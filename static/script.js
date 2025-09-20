@@ -27,12 +27,28 @@ document.addEventListener('DOMContentLoaded', () => {
         openInNewWindow: { zh: "在新窗口中打开", en: "Open in new window" },
         saveAsHTML: { zh: "保存为 HTML", en: "Save as HTML" },
         exportAsVideo: { zh: "导出为视频", en: "Export as Video" },
+        generateVoiceover: { zh: "生成配音", en: "Generate Voiceover" },
+        downloadVoiceover: { zh: "下载配音", en: "Download Voiceover" },
         featureComingSoon: { zh: "该功能正在开发中，将在不久的将来推出。\n 请关注我们的官方 GitHub 仓库以获取最新动态！", en: "This feature is under development and will be available soon.\n Follow our official GitHub repository for the latest updates!" },
         visitGitHub: { zh: "访问 GitHub", en: "Visit GitHub" },
         errorMessage: { zh: "抱歉，服务出现了一点问题。请稍后重试。", en: "Sorry, something went wrong. Please try again later." },
         errorFetchFailed: {zh: "LLM服务不可用，请稍后再试", en: "LLM service is unavailable. Please try again later."},
         errorTooManyRequests: {zh: "今天已经使用太多，请明天再试", en: "Too many requests today. Please try again tomorrow."},
         errorLLMParseError: {zh: "返回的动画代码解析失败，请调整提示词重新生成。", en: "Failed to parse the returned animation code. Please adjust your prompt and try again."},
+        voiceoverPlaceholder: { zh: "生成的配音将在这里显示", en: "Generated voiceover will appear here." },
+        voiceoverModalTitle: { zh: "生成动画配音", en: "Generate Animation Voiceover" },
+        voiceoverModalDescription: { zh: "输入旁白文本并上传说话人参考音频，系统会调用 TTS 服务生成配音。", en: "Provide narration text and a speaker reference audio to generate a voiceover via the TTS service." },
+        voiceoverTextLabel: { zh: "旁白文本", en: "Narration text" },
+        voiceoverVoiceLabel: { zh: "说话人参考音频", en: "Speaker reference audio" },
+        voiceoverEmotionLabel: { zh: "情感参考音频（可选）", en: "Emotion reference audio (optional)" },
+        voiceoverGenerateButton: { zh: "开始生成", en: "Generate" },
+        voiceoverGeneratingStatus: { zh: "配音生成中...", en: "Generating voiceover..." },
+        voiceoverSuccessStatus: { zh: "配音已生成", en: "Voiceover ready" },
+        voiceoverErrorStatus: { zh: "配音生成失败，请重试。", en: "Voiceover generation failed. Please try again." },
+        voiceoverMissingAudio: { zh: "请先生成配音后再下载。", en: "Generate a voiceover before downloading." },
+        voiceoverServiceUnavailable: { zh: "配音服务暂不可用，请稍后再试。", en: "Voiceover service is unavailable. Please try again later." },
+        voiceoverSpeakerRequired: { zh: "请上传说话人参考音频。", en: "Please upload a speaker reference audio file." },
+        voiceoverTextRequired: { zh: "请输入要朗读的文本。", en: "Please enter narration text." },
     };
 
     let currentLang = config.defaultLang;
@@ -48,6 +64,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const featureModal = document.getElementById('feature-modal');
     const modalGitHubButton = document.getElementById('modal-github-button');
     const modalCloseButton = document.getElementById('modal-close-button');
+    const voiceoverModal = document.getElementById('voiceover-modal');
+    const voiceoverCloseButton = document.getElementById('voiceover-close-button');
+    const voiceoverForm = document.getElementById('voiceover-form');
+    const voiceoverTextInput = document.getElementById('voiceover-text');
+    const voiceoverSpeakerInput = document.getElementById('voiceover-speaker');
+    const voiceoverEmotionInput = document.getElementById('voiceover-emo');
+    const voiceoverStatus = document.getElementById('voiceover-status');
+    const voiceoverSubmitButton = document.getElementById('voiceover-submit-button');
 
     const templates = {
         user: document.getElementById('user-message-template'),
@@ -68,6 +92,61 @@ document.addEventListener('DOMContentLoaded', () => {
     let conversationHistory = [];
     let accumulatedCode = '';
     let placeholderInterval;
+    let activeVoiceoverPlayer = null;
+    let activeVoiceoverTopic = '';
+
+    function resetVoiceoverStatus() {
+        if (!voiceoverStatus) return;
+        voiceoverStatus.textContent = '';
+        voiceoverStatus.className = 'voiceover-status';
+    }
+
+    function openVoiceoverModal(playerElement, topic) {
+        if (!voiceoverModal || !voiceoverTextInput || !voiceoverSpeakerInput) return;
+        activeVoiceoverPlayer = playerElement;
+        activeVoiceoverTopic = topic || '';
+        voiceoverTextInput.value = topic || '';
+        voiceoverSpeakerInput.value = '';
+        if (voiceoverEmotionInput) voiceoverEmotionInput.value = '';
+        resetVoiceoverStatus();
+        voiceoverModal.classList.add('visible');
+    }
+
+    function closeVoiceoverModal() {
+        if (!voiceoverModal) return;
+        if (voiceoverSpeakerInput) voiceoverSpeakerInput.value = '';
+        if (voiceoverEmotionInput) voiceoverEmotionInput.value = '';
+        activeVoiceoverPlayer = null;
+        activeVoiceoverTopic = '';
+        voiceoverModal.classList.remove('visible');
+    }
+
+    function attachVoiceoverToPlayer(playerElement, blob, topic) {
+        if (!playerElement || !blob) return;
+        const container = playerElement.querySelector('.voiceover-container');
+        if (!container) return;
+
+        const previousAudio = container.querySelector('audio');
+        if (previousAudio?.dataset?.objectUrl) {
+            URL.revokeObjectURL(previousAudio.dataset.objectUrl);
+        }
+
+        const objectUrl = URL.createObjectURL(blob);
+        const audioElement = document.createElement('audio');
+        audioElement.controls = true;
+        audioElement.src = objectUrl;
+        audioElement.dataset.objectUrl = objectUrl;
+        audioElement.setAttribute('preload', 'auto');
+
+        container.innerHTML = '';
+        container.appendChild(audioElement);
+        container.classList.remove('empty');
+
+        const downloadButton = playerElement.querySelector('.download-voiceover');
+        if (downloadButton) {
+            downloadButton.disabled = false;
+        }
+    }
 
     function handleFormSubmit(e) {
         e.preventDefault();
@@ -283,6 +362,32 @@ document.addEventListener('DOMContentLoaded', () => {
             URL.revokeObjectURL(url);
             a.remove();
         });
+        const voiceoverButton = playerElement.querySelector('.generate-voiceover');
+        if (voiceoverButton) {
+            voiceoverButton.addEventListener('click', () => {
+                openVoiceoverModal(playerElement, topic);
+            });
+        }
+        const downloadVoiceoverButton = playerElement.querySelector('.download-voiceover');
+        if (downloadVoiceoverButton) {
+            downloadVoiceoverButton.disabled = true;
+            downloadVoiceoverButton.addEventListener('click', () => {
+                const audioElement = playerElement.querySelector('.voiceover-container audio');
+                if (!audioElement) {
+                    showWarning(translations.voiceoverMissingAudio[currentLang]);
+                    return;
+                }
+                const url = audioElement.dataset.objectUrl || audioElement.src;
+                const safeTopic = (topic || 'voiceover').trim().replace(/\s+/g, '_');
+                const link = Object.assign(document.createElement('a'), {
+                    href: url,
+                    download: `${safeTopic || 'voiceover'}.wav`,
+                });
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+            });
+        }
         playerElement.querySelector('.export-video')?.addEventListener('click', () => {
             featureModal.querySelector('p').textContent = translations.featureComingSoon[currentLang];
             modalGitHubButton.textContent = translations.visitGitHub[currentLang];
@@ -385,10 +490,110 @@ document.addEventListener('DOMContentLoaded', () => {
             hideModal();
         });
 
+        if (voiceoverCloseButton) {
+            voiceoverCloseButton.addEventListener('click', (event) => {
+                event.preventDefault();
+                if (voiceoverSubmitButton?.disabled) return;
+                closeVoiceoverModal();
+            });
+        }
+
+        if (voiceoverModal) {
+            voiceoverModal.addEventListener('click', (event) => {
+                if (event.target === voiceoverModal && !voiceoverSubmitButton?.disabled) {
+                    closeVoiceoverModal();
+                }
+            });
+        }
+
+        if (voiceoverForm) {
+            voiceoverForm.addEventListener('submit', async (event) => {
+                event.preventDefault();
+                if (!activeVoiceoverPlayer) {
+                    showWarning(translations.voiceoverServiceUnavailable[currentLang]);
+                    return;
+                }
+
+                const narrationText = voiceoverTextInput?.value.trim();
+                if (!narrationText) {
+                    showWarning(translations.voiceoverTextRequired[currentLang]);
+                    return;
+                }
+
+                const speakerFile = voiceoverSpeakerInput?.files?.[0];
+                if (!speakerFile) {
+                    showWarning(translations.voiceoverSpeakerRequired[currentLang]);
+                    return;
+                }
+
+                resetVoiceoverStatus();
+                if (voiceoverStatus) {
+                    voiceoverStatus.textContent = translations.voiceoverGeneratingStatus[currentLang];
+                }
+
+                if (voiceoverSubmitButton) {
+                    voiceoverSubmitButton.disabled = true;
+                }
+
+                const formData = new FormData();
+                formData.append('text', narrationText);
+                formData.append('speaker_audio', speakerFile);
+                if (voiceoverEmotionInput?.files?.[0]) {
+                    formData.append('emo_audio', voiceoverEmotionInput.files[0]);
+                }
+
+                try {
+                    const response = await fetch(`${config.apiBaseUrl}/voiceover`, {
+                        method: 'POST',
+                        body: formData,
+                    });
+
+                    if (!response.ok) {
+                        const errorText = await response.text();
+                        let message = translations.voiceoverErrorStatus[currentLang];
+                        try {
+                            const parsed = JSON.parse(errorText);
+                            if (parsed?.detail) message = parsed.detail;
+                        } catch (parseError) {
+                            console.warn('Failed to parse voiceover error response:', parseError);
+                        }
+                        if (voiceoverStatus) {
+                            voiceoverStatus.textContent = message;
+                            voiceoverStatus.classList.add('error');
+                        }
+                        showWarning(message);
+                        return;
+                    }
+
+                    const blob = await response.blob();
+                    attachVoiceoverToPlayer(activeVoiceoverPlayer, blob, activeVoiceoverTopic || narrationText);
+                    if (voiceoverStatus) {
+                        voiceoverStatus.textContent = translations.voiceoverSuccessStatus[currentLang];
+                        voiceoverStatus.classList.add('success');
+                    }
+
+                    setTimeout(() => {
+                        closeVoiceoverModal();
+                    }, 600);
+                } catch (error) {
+                    console.error('Voiceover generation failed:', error);
+                    if (voiceoverStatus) {
+                        voiceoverStatus.textContent = translations.voiceoverErrorStatus[currentLang];
+                        voiceoverStatus.classList.add('error');
+                    }
+                    showWarning(translations.voiceoverServiceUnavailable[currentLang]);
+                } finally {
+                    if (voiceoverSubmitButton) {
+                        voiceoverSubmitButton.disabled = false;
+                    }
+                }
+            });
+        }
+
         const savedLang = localStorage.getItem('preferredLanguage');
         const browserLang = navigator.language?.toLowerCase() || ''; // e.g. 'zh-cn'
 
-        let initialLang = 'en'; 
+        let initialLang = 'en';
         if (['zh', 'en'].includes(savedLang)) {
             initialLang = savedLang;
         } else if (browserLang.startsWith('zh')) {
