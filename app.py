@@ -2,7 +2,8 @@ import asyncio
 import json
 import os
 from datetime import datetime
-from typing import AsyncGenerator, List, Optional
+from pathlib import Path
+from typing import AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
 import pytz
@@ -23,7 +24,9 @@ except ModuleNotFoundError:
 # -----------------------------------------------------------------------
 shanghai_tz = pytz.timezone("Asia/Shanghai")
 
-credentials = json.load(open("credentials.json"))
+_CREDENTIALS_PATH = Path("credentials.json")
+credentials = json.load(_CREDENTIALS_PATH.open())
+CREDENTIALS_DIR = _CREDENTIALS_PATH.resolve().parent
 API_KEY = credentials["API_KEY"]
 BASE_URL = credentials.get("BASE_URL", "")
 MODEL = credentials.get("MODEL", "gemini-2.5-pro")
@@ -51,7 +54,158 @@ else:
 if API_KEY.startswith("sk-REPLACE_ME"):
     raise RuntimeError("请在环境变量里配置 API_KEY")
 
-TTS_BASE_URL = credentials.get("TTS_BASE_URL") or os.getenv("TTS_BASE_URL")
+def _get_config_value(key: str, default=None):
+    value = credentials.get(key)
+    if value in ("", None):
+        value = os.getenv(key, None)
+    if value in ("", None):
+        return default
+    return value
+
+
+def _parse_bool(value, default: Optional[bool] = None) -> Optional[bool]:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    lowered = str(value).strip().lower()
+    if lowered in {"true", "1", "yes", "y", "on"}:
+        return True
+    if lowered in {"false", "0", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _safe_cast(value, cast_type, default=None):
+    if value in (None, ""):
+        return default
+    try:
+        return cast_type(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_config_path(raw_path: Optional[str]) -> Optional[Path]:
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = (CREDENTIALS_DIR / path).resolve()
+    return path
+
+
+INDEXTTS_API_URL = _get_config_value("INDEXTTS_API_URL")
+LEGACY_TTS_BASE_URL = _get_config_value("TTS_BASE_URL")
+TTS_ENDPOINT_URL = None
+if INDEXTTS_API_URL:
+    normalized = INDEXTTS_API_URL.rstrip("/")
+    if not normalized.lower().endswith("/tts"):
+        normalized = normalized + "/tts"
+    TTS_ENDPOINT_URL = normalized
+elif LEGACY_TTS_BASE_URL:
+    TTS_ENDPOINT_URL = LEGACY_TTS_BASE_URL.rstrip("/") + "/tts"
+
+INDEXTTS_TIMEOUT = _safe_cast(_get_config_value("INDEXTTS_TIMEOUT"), float, default=None)
+
+DEFAULT_SPEAKER_AUDIO_PATH = _resolve_config_path(
+    _get_config_value("DEFAULT_SPEAKER_AUDIO_PATH")
+)
+INDEXTTS_PROMPT_WAV_PATH = _resolve_config_path(_get_config_value("INDEXTTS_PROMPT_WAV"))
+if DEFAULT_SPEAKER_AUDIO_PATH is None and INDEXTTS_PROMPT_WAV_PATH is not None:
+    DEFAULT_SPEAKER_AUDIO_PATH = INDEXTTS_PROMPT_WAV_PATH
+
+DEFAULT_EMO_AUDIO_PATH = _resolve_config_path(
+    _get_config_value("DEFAULT_EMO_AUDIO_PATH")
+)
+
+INDEXTTS_DEFAULT_EMOTION = (
+    str(_get_config_value("INDEXTTS_EMOTION", "neutral")).strip().lower()
+)
+
+def _collect_common_tts_form_data() -> Dict[str, object]:
+    mapping = {
+        "use_random": _parse_bool(_get_config_value("INDEXTTS_USE_RANDOM"), default=False),
+        "interval_silence": _safe_cast(_get_config_value("INDEXTTS_INTERVAL_SILENCE"), int),
+        "max_text_tokens_per_segment": _safe_cast(
+            _get_config_value("INDEXTTS_MAX_TEXT_TOKENS"), int
+        ),
+        "temperature": _safe_cast(_get_config_value("INDEXTTS_TEMPERATURE"), float),
+        "top_p": _safe_cast(_get_config_value("INDEXTTS_TOP_P"), float),
+        "top_k": _safe_cast(_get_config_value("INDEXTTS_TOP_K"), int),
+        "repetition_penalty": _safe_cast(
+            _get_config_value("INDEXTTS_REPETITION_PENALTY"), float
+        ),
+        "max_mel_tokens": _safe_cast(_get_config_value("INDEXTTS_MAX_MEL_TOKENS"), int),
+    }
+    return {k: v for k, v in mapping.items() if v is not None}
+
+
+INDEXTTS_COMMON_FORM_DATA = _collect_common_tts_form_data()
+
+
+def _collect_emotion_configs() -> Dict[str, Dict[str, object]]:
+    raw_keys = set(credentials.keys()) | {
+        key for key in os.environ.keys() if key.startswith("INDEXTTS_")
+    }
+    configs: Dict[str, Dict[str, object]] = {}
+    prefix_map = {
+        "INDEXTTS_EMO_WAV_": "emo_audio_path",
+        "INDEXTTS_EMO_TEXT_": "emo_text",
+        "INDEXTTS_EMO_VECTOR_JSON_": "emo_vector_json",
+        "INDEXTTS_EMO_ALPHA_": "emo_alpha",
+        "INDEXTTS_USE_EMO_TEXT_": "use_emo_text",
+    }
+
+    for prefix, field_name in prefix_map.items():
+        for key in raw_keys:
+            if not key.startswith(prefix):
+                continue
+            emotion_key = key[len(prefix) :].lower()
+            value = _get_config_value(key)
+            if value in (None, ""):
+                continue
+            entry = configs.setdefault(emotion_key, {})
+            if field_name == "emo_audio_path":
+                entry[field_name] = _resolve_config_path(value)
+            elif field_name == "emo_alpha":
+                entry[field_name] = _safe_cast(value, float)
+            elif field_name == "use_emo_text":
+                entry[field_name] = _parse_bool(value, default=None)
+            else:
+                entry[field_name] = value
+
+    return configs
+
+
+INDEXTTS_EMOTION_CONFIGS = _collect_emotion_configs()
+
+
+def _load_audio_file(path: Path, error_detail: str) -> Tuple[str, bytes, str]:
+    if not path.exists():
+        raise HTTPException(status_code=500, detail=error_detail)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=error_detail) from exc
+    return (path.name, data, "audio/wav")
+
+
+def _load_text_reference(value: str, error_detail: str) -> str:
+    resolved_path = _resolve_config_path(value)
+    if resolved_path and resolved_path.exists():
+        try:
+            return resolved_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=error_detail) from exc
+    if isinstance(value, str):
+        looks_like_path = any(sep in value for sep in ("/", "\\")) or value.lower().endswith(
+            (".txt", ".json", ".wav")
+        )
+        if resolved_path and looks_like_path and not resolved_path.exists():
+            raise HTTPException(status_code=500, detail=error_detail)
+    return value
 
 templates = Jinja2Templates(directory="templates")
 
@@ -71,6 +225,11 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 class ChatRequest(BaseModel):
     topic: str
     history: Optional[List[dict]] = None
+
+
+class AutoVoiceoverRequest(BaseModel):
+    text: str
+    topic: Optional[str] = None
 
 # -----------------------------------------------------------------------
 # 2. 核心：流式生成器 (现在会使用 history)
@@ -189,38 +348,49 @@ async def generate(
     return StreamingResponse(wrapped_stream(), headers=headers)
 
 
-@app.post("/voiceover")
-async def generate_voiceover(
-    text: str = Form(...),
-    speaker_audio: UploadFile = File(...),
-    emo_audio: Optional[UploadFile] = File(None),
-):
-    """Proxy text-to-speech requests to the configured TTS service."""
+def _serialize_form_data(data: Dict[str, object]) -> Dict[str, str]:
+    serialized: Dict[str, str] = {}
+    for key, value in data.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            serialized[key] = "true" if value else "false"
+        else:
+            serialized[key] = str(value)
+    return serialized
 
-    if not TTS_BASE_URL:
+
+async def _forward_tts_request(
+    text: str,
+    speaker_file: Tuple[str, bytes, str],
+    emo_file: Optional[Tuple[str, bytes, str]] = None,
+    extra_form_data: Optional[Dict[str, object]] = None,
+) -> Response:
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="Text for voiceover cannot be empty.")
+
+    if not TTS_ENDPOINT_URL:
         raise HTTPException(status_code=503, detail="TTS service is not configured.")
 
-    tts_endpoint = TTS_BASE_URL.rstrip("/") + "/tts"
+    tts_endpoint = TTS_ENDPOINT_URL
+    files = {"speaker_audio": speaker_file}
+    if emo_file is not None:
+        files["emo_audio"] = emo_file
+
+    form_data = {"text": text}
+    if INDEXTTS_COMMON_FORM_DATA:
+        form_data.update(INDEXTTS_COMMON_FORM_DATA)
+    if extra_form_data:
+        form_data.update(extra_form_data)
 
     try:
-        speaker_bytes = await speaker_audio.read()
-        files = {
-            "speaker_audio": (
-                speaker_audio.filename or "prompt.wav",
-                speaker_bytes,
-                speaker_audio.content_type or "audio/wav",
+        timeout = None if INDEXTTS_TIMEOUT is None else httpx.Timeout(INDEXTTS_TIMEOUT)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                tts_endpoint,
+                data=_serialize_form_data(form_data),
+                files=files,
             )
-        }
-        if emo_audio is not None:
-            emo_bytes = await emo_audio.read()
-            files["emo_audio"] = (
-                emo_audio.filename or "emotion.wav",
-                emo_bytes,
-                emo_audio.content_type or "audio/wav",
-            )
-
-        async with httpx.AsyncClient(timeout=None) as client:
-            response = await client.post(tts_endpoint, data={"text": text}, files=files)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"TTS request failed: {exc}") from exc
 
@@ -238,6 +408,91 @@ async def generate_voiceover(
         "Content-Type": response.headers.get("content-type", "audio/wav"),
     }
     return Response(content=response.content, headers=headers)
+
+
+@app.post("/voiceover")
+async def generate_voiceover(
+    text: str = Form(...),
+    speaker_audio: UploadFile = File(...),
+    emo_audio: Optional[UploadFile] = File(None),
+):
+    """Proxy text-to-speech requests to the configured TTS service."""
+
+    speaker_bytes = await speaker_audio.read()
+    speaker_tuple = (
+        speaker_audio.filename or "prompt.wav",
+        speaker_bytes,
+        speaker_audio.content_type or "audio/wav",
+    )
+
+    emo_tuple = None
+    if emo_audio is not None:
+        emo_bytes = await emo_audio.read()
+        emo_tuple = (
+            emo_audio.filename or "emotion.wav",
+            emo_bytes,
+            emo_audio.content_type or "audio/wav",
+        )
+
+    return await _forward_tts_request(text, speaker_tuple, emo_tuple)
+
+
+@app.post("/voiceover/auto")
+async def generate_auto_voiceover(payload: AutoVoiceoverRequest):
+    """Generate voiceover using the default speaker audio without manual input."""
+
+    if not DEFAULT_SPEAKER_AUDIO_PATH:
+        raise HTTPException(
+            status_code=503,
+            detail="Default speaker audio is not configured for automatic voiceover.",
+        )
+
+    speaker_tuple = _load_audio_file(
+        DEFAULT_SPEAKER_AUDIO_PATH,
+        "Default speaker audio file was not found on the server.",
+    )
+
+    emotion_key = INDEXTTS_DEFAULT_EMOTION or ""
+    emotion_config = INDEXTTS_EMOTION_CONFIGS.get(emotion_key)
+    emo_tuple: Optional[Tuple[str, bytes, str]] = None
+    extra_form_data: Dict[str, object] = {}
+
+    if emotion_config:
+        emo_audio_path = emotion_config.get("emo_audio_path")
+        if isinstance(emo_audio_path, Path):
+            emo_tuple = _load_audio_file(
+                emo_audio_path,
+                "Configured emotion audio file was not found.",
+            )
+
+        emo_text_value = emotion_config.get("emo_text")
+        if isinstance(emo_text_value, str):
+            extra_form_data["emo_text"] = _load_text_reference(
+                emo_text_value,
+                "Failed to load configured emotion text reference.",
+            )
+
+        emo_vector_value = emotion_config.get("emo_vector_json")
+        if isinstance(emo_vector_value, str):
+            extra_form_data["emo_vector_json"] = _load_text_reference(
+                emo_vector_value,
+                "Failed to load configured emotion vector reference.",
+            )
+
+        use_emo_text = emotion_config.get("use_emo_text")
+        if use_emo_text is not None:
+            extra_form_data["use_emo_text"] = use_emo_text
+
+        emo_alpha = emotion_config.get("emo_alpha")
+        if emo_alpha is not None:
+            extra_form_data["emo_alpha"] = emo_alpha
+    elif DEFAULT_EMO_AUDIO_PATH:
+        emo_tuple = _load_audio_file(
+            DEFAULT_EMO_AUDIO_PATH,
+            "Configured default emotion audio file was not found.",
+        )
+
+    return await _forward_tts_request(payload.text, speaker_tuple, emo_tuple, extra_form_data)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_index(request: Request):
