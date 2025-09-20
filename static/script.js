@@ -36,6 +36,10 @@ document.addEventListener('DOMContentLoaded', () => {
         errorTooManyRequests: {zh: "今天已经使用太多，请明天再试", en: "Too many requests today. Please try again tomorrow."},
         errorLLMParseError: {zh: "返回的动画代码解析失败，请调整提示词重新生成。", en: "Failed to parse the returned animation code. Please adjust your prompt and try again."},
         voiceoverPlaceholder: { zh: "生成的配音将在这里显示", en: "Generated voiceover will appear here." },
+        voiceoverAutoGenerating: { zh: "自动配音生成中...", en: "Generating Chinese voiceover..." },
+        voiceoverAutoReady: { zh: "自动配音已生成", en: "Chinese voiceover ready" },
+        voiceoverAutoFailed: { zh: "自动配音失败", en: "Auto voiceover failed." },
+        voiceoverAutoSubtitleMissing: { zh: "未识别到中文字幕，无法生成配音。", en: "No Chinese subtitles detected. Unable to create voiceover." },
         voiceoverModalTitle: { zh: "生成动画配音", en: "Generate Animation Voiceover" },
         voiceoverModalDescription: { zh: "输入旁白文本并上传说话人参考音频，系统会调用 TTS 服务生成配音。", en: "Provide narration text and a speaker reference audio to generate a voiceover via the TTS service." },
         voiceoverTextLabel: { zh: "旁白文本", en: "Narration text" },
@@ -50,6 +54,8 @@ document.addEventListener('DOMContentLoaded', () => {
         voiceoverSpeakerRequired: { zh: "请上传说话人参考音频。", en: "Please upload a speaker reference audio file." },
         voiceoverTextRequired: { zh: "请输入要朗读的文本。", en: "Please enter narration text." },
     };
+
+    const CHINESE_CHAR_REGEX = /[\u3400-\u9fff]/;
 
     let currentLang = config.defaultLang;
     const body = document.body;
@@ -101,6 +107,142 @@ document.addEventListener('DOMContentLoaded', () => {
         voiceoverStatus.className = 'voiceover-status';
     }
 
+    function setVoiceoverButtonTranslation(button, key) {
+        if (!button) return;
+        const label = button.querySelector('span[data-translate-key]');
+        if (!label) return;
+        if (key) label.dataset.translateKey = key;
+        const translation = translations[key]?.[currentLang];
+        if (translation) label.textContent = translation;
+    }
+
+    function updateVoiceoverStatus(playerElement, translationKey, stateClass = '', customText = null) {
+        if (!playerElement) return;
+        const container = playerElement.querySelector('.voiceover-container');
+        if (!container) return;
+        container.classList.remove('empty', 'loading', 'error', 'success');
+        if (stateClass) container.classList.add(stateClass);
+        const message = customText ?? translations[translationKey]?.[currentLang] ?? '';
+        const placeholder = document.createElement('p');
+        placeholder.className = 'voiceover-placeholder';
+        if (translationKey) {
+            placeholder.dataset.translateKey = translationKey;
+        }
+        placeholder.textContent = message;
+        container.innerHTML = '';
+        container.appendChild(placeholder);
+    }
+
+    function extractChineseNarrationFromHtml(htmlContent) {
+        if (!htmlContent) return '';
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlContent, 'text/html');
+        if (!doc) return '';
+
+        const selectors = [
+            '[data-subtitle]',
+            '[data-caption]',
+            '.subtitle',
+            '.subtitles',
+            '.captions',
+            '.caption',
+            '[class*="subtitle"]',
+            '[class*="caption"]',
+            '[id*="subtitle"]',
+            '[id*="caption"]',
+        ];
+
+        const seen = new Set();
+        const segments = [];
+
+        const collectText = (rawText) => {
+            if (!rawText) return;
+            const normalized = rawText.replace(/\s+/g, ' ').trim();
+            if (!normalized) return;
+            if (!CHINESE_CHAR_REGEX.test(normalized)) return;
+            const chineseParts = normalized.match(/[\u3400-\u9fff0-9\u3000-\u303F\uFF00-\uFFEF，。、！？：；“”‘’（）·—…\s]+/g);
+            const chineseText = chineseParts ? chineseParts.join('').replace(/\s+/g, ' ').trim() : '';
+            if (!chineseText || !CHINESE_CHAR_REGEX.test(chineseText)) return;
+            if (seen.has(chineseText)) return;
+            seen.add(chineseText);
+            segments.push(chineseText);
+        };
+
+        const candidateElements = new Set();
+        selectors.forEach((selector) => {
+            doc.querySelectorAll(selector).forEach((el) => candidateElements.add(el));
+        });
+
+        candidateElements.forEach((el) => collectText(el.textContent || ''));
+
+        if (segments.length === 0) {
+            const walker = doc.createTreeWalker(doc.body || doc, NodeFilter.SHOW_TEXT, null);
+            let node;
+            while ((node = walker.nextNode())) {
+                const parentTag = node.parentElement?.tagName?.toLowerCase();
+                if (parentTag && ['script', 'style'].includes(parentTag)) continue;
+                collectText(node.textContent || '');
+            }
+        }
+
+        const combined = segments.join('\n');
+        return combined.length > 4000 ? combined.slice(0, 4000) : combined;
+    }
+
+    async function autoGenerateVoiceoverForPlayer(playerElement, htmlContent, topic) {
+        if (!playerElement) return;
+        const voiceoverButton = playerElement.querySelector('.generate-voiceover');
+        setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoGenerating');
+        if (voiceoverButton) {
+            voiceoverButton.disabled = true;
+            voiceoverButton.classList.add('disabled');
+        }
+
+        updateVoiceoverStatus(playerElement, 'voiceoverAutoGenerating', 'loading');
+
+        const narrationText = extractChineseNarrationFromHtml(htmlContent);
+        if (!narrationText) {
+            updateVoiceoverStatus(playerElement, 'voiceoverAutoSubtitleMissing', 'error');
+            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoFailed');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/voiceover/auto`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: narrationText, topic: topic || '' }),
+            });
+
+            if (!response.ok) {
+                const errorBody = await response.text();
+                let errorMessage = translations.voiceoverAutoFailed[currentLang] || '';
+                try {
+                    const parsed = JSON.parse(errorBody);
+                    if (parsed?.detail) errorMessage = parsed.detail;
+                } catch (parseError) {
+                    if (errorBody) errorMessage = errorBody;
+                }
+                updateVoiceoverStatus(playerElement, null, 'error', errorMessage);
+                setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoFailed');
+                showWarning(errorMessage);
+                return;
+            }
+
+            const blob = await response.blob();
+            attachVoiceoverToPlayer(playerElement, blob, topic || narrationText);
+            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoReady');
+        } catch (error) {
+            console.error('Auto voiceover generation failed:', error);
+            const fallbackMessage = translations.voiceoverServiceUnavailable[currentLang]
+                || translations.voiceoverAutoFailed[currentLang]
+                || 'Voiceover service is unavailable.';
+            updateVoiceoverStatus(playerElement, null, 'error', fallbackMessage);
+            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoFailed');
+            showWarning(fallbackMessage);
+        }
+    }
+
     function openVoiceoverModal(playerElement, topic) {
         if (!voiceoverModal || !voiceoverTextInput || !voiceoverSpeakerInput) return;
         activeVoiceoverPlayer = playerElement;
@@ -140,7 +282,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         container.innerHTML = '';
         container.appendChild(audioElement);
-        container.classList.remove('empty');
+        container.classList.remove('empty', 'loading', 'error');
+        container.classList.add('success');
 
         const downloadButton = playerElement.querySelector('.download-voiceover');
         if (downloadButton) {
@@ -364,9 +507,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         const voiceoverButton = playerElement.querySelector('.generate-voiceover');
         if (voiceoverButton) {
-            voiceoverButton.addEventListener('click', () => {
-                openVoiceoverModal(playerElement, topic);
-            });
+            voiceoverButton.disabled = true;
+            voiceoverButton.classList.add('disabled');
+            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoGenerating');
         }
         const downloadVoiceoverButton = playerElement.querySelector('.download-voiceover');
         if (downloadVoiceoverButton) {
@@ -395,6 +538,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         chatLog.appendChild(playerElement);
         scrollToBottom();
+        autoGenerateVoiceoverForPlayer(playerElement, htmlContent, topic).catch((error) => {
+            console.error('Auto voiceover generation encountered an unexpected error:', error);
+        });
     }
 
     function isHtmlContentValid(htmlContent) {
