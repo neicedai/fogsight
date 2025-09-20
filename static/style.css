@@ -125,6 +125,11 @@ button:disabled {
 .voiceover-container audio { width: 100%; }
 .voiceover-placeholder { margin: 0; color: var(--text-secondary); font-size: 0.9rem; text-align: center; }
 .voiceover-container.empty { background: rgba(255,255,255,0.4); }
+.voiceover-container.loading { background: rgba(255,255,255,0.7); border-style: solid; border-color: rgba(10, 132, 255, 0.2); }
+.voiceover-container.loading .voiceover-placeholder { color: #0A84FF; }
+.voiceover-container.error { background: #FFF5F5; border-style: solid; border-color: #FFB3B3; }
+.voiceover-container.error .voiceover-placeholder { color: #D8000C; }
+.voiceover-container.success { background: #F3FFF6; border-style: solid; border-color: #A3E9C5; }
 
 /* === 动画占位符 === */
 .animated-placeholder { position: absolute; top: 0; left: 25px; height: 60px; width: calc(100% - 85px); display: flex; align-items: center; overflow: hidden; pointer-events: none; }

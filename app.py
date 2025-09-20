@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator, List, Optional
 
 import httpx
@@ -52,6 +53,14 @@ if API_KEY.startswith("sk-REPLACE_ME"):
     raise RuntimeError("请在环境变量里配置 API_KEY")
 
 TTS_BASE_URL = credentials.get("TTS_BASE_URL") or os.getenv("TTS_BASE_URL")
+DEFAULT_SPEAKER_AUDIO_PATH = (
+    credentials.get("DEFAULT_SPEAKER_AUDIO_PATH")
+    or os.getenv("DEFAULT_SPEAKER_AUDIO_PATH")
+)
+DEFAULT_EMO_AUDIO_PATH = (
+    credentials.get("DEFAULT_EMO_AUDIO_PATH")
+    or os.getenv("DEFAULT_EMO_AUDIO_PATH")
+)
 
 templates = Jinja2Templates(directory="templates")
 
@@ -71,6 +80,11 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 class ChatRequest(BaseModel):
     topic: str
     history: Optional[List[dict]] = None
+
+
+class AutoVoiceoverRequest(BaseModel):
+    text: str
+    topic: Optional[str] = None
 
 # -----------------------------------------------------------------------
 # 2. 核心：流式生成器 (现在会使用 history)
@@ -189,36 +203,23 @@ async def generate(
     return StreamingResponse(wrapped_stream(), headers=headers)
 
 
-@app.post("/voiceover")
-async def generate_voiceover(
-    text: str = Form(...),
-    speaker_audio: UploadFile = File(...),
-    emo_audio: Optional[UploadFile] = File(None),
-):
-    """Proxy text-to-speech requests to the configured TTS service."""
+async def _forward_tts_request(
+    text: str,
+    speaker_file: tuple,
+    emo_file: Optional[tuple] = None,
+) -> Response:
+    if not text or not text.strip():
+        raise HTTPException(status_code=400, detail="Text for voiceover cannot be empty.")
 
     if not TTS_BASE_URL:
         raise HTTPException(status_code=503, detail="TTS service is not configured.")
 
     tts_endpoint = TTS_BASE_URL.rstrip("/") + "/tts"
+    files = {"speaker_audio": speaker_file}
+    if emo_file is not None:
+        files["emo_audio"] = emo_file
 
     try:
-        speaker_bytes = await speaker_audio.read()
-        files = {
-            "speaker_audio": (
-                speaker_audio.filename or "prompt.wav",
-                speaker_bytes,
-                speaker_audio.content_type or "audio/wav",
-            )
-        }
-        if emo_audio is not None:
-            emo_bytes = await emo_audio.read()
-            files["emo_audio"] = (
-                emo_audio.filename or "emotion.wav",
-                emo_bytes,
-                emo_audio.content_type or "audio/wav",
-            )
-
         async with httpx.AsyncClient(timeout=None) as client:
             response = await client.post(tts_endpoint, data={"text": text}, files=files)
     except httpx.HTTPError as exc:
@@ -238,6 +239,88 @@ async def generate_voiceover(
         "Content-Type": response.headers.get("content-type", "audio/wav"),
     }
     return Response(content=response.content, headers=headers)
+
+
+@app.post("/voiceover")
+async def generate_voiceover(
+    text: str = Form(...),
+    speaker_audio: UploadFile = File(...),
+    emo_audio: Optional[UploadFile] = File(None),
+):
+    """Proxy text-to-speech requests to the configured TTS service."""
+
+    speaker_bytes = await speaker_audio.read()
+    speaker_tuple = (
+        speaker_audio.filename or "prompt.wav",
+        speaker_bytes,
+        speaker_audio.content_type or "audio/wav",
+    )
+
+    emo_tuple = None
+    if emo_audio is not None:
+        emo_bytes = await emo_audio.read()
+        emo_tuple = (
+            emo_audio.filename or "emotion.wav",
+            emo_bytes,
+            emo_audio.content_type or "audio/wav",
+        )
+
+    return await _forward_tts_request(text, speaker_tuple, emo_tuple)
+
+
+@app.post("/voiceover/auto")
+async def generate_auto_voiceover(payload: AutoVoiceoverRequest):
+    """Generate voiceover using the default speaker audio without manual input."""
+
+    if not DEFAULT_SPEAKER_AUDIO_PATH:
+        raise HTTPException(
+            status_code=503,
+            detail="Default speaker audio is not configured for automatic voiceover.",
+        )
+
+    speaker_path = Path(DEFAULT_SPEAKER_AUDIO_PATH)
+    if not speaker_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail="Default speaker audio file was not found on the server.",
+        )
+
+    try:
+        speaker_bytes = speaker_path.read_bytes()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to read default speaker audio file.",
+        ) from exc
+
+    speaker_tuple = (
+        speaker_path.name,
+        speaker_bytes,
+        "audio/wav",
+    )
+
+    emo_tuple = None
+    if DEFAULT_EMO_AUDIO_PATH:
+        emo_path = Path(DEFAULT_EMO_AUDIO_PATH)
+        if not emo_path.exists():
+            raise HTTPException(
+                status_code=500,
+                detail="Configured default emotion audio file was not found.",
+            )
+        try:
+            emo_bytes = emo_path.read_bytes()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to read default emotion audio file.",
+            ) from exc
+        emo_tuple = (
+            emo_path.name,
+            emo_bytes,
+            "audio/wav",
+        )
+
+    return await _forward_tts_request(payload.text, speaker_tuple, emo_tuple)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_index(request: Request):
