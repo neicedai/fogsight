@@ -118,10 +118,21 @@
                         <svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
                         <span data-translate-key="saveAsHTML">保存为 HTML</span>
                     </button>
+                    <button class="action-button generate-voiceover">
+                        <svg viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M15 8a5 5 0 0 1 0 8" /><path d="M19 5a9 9 0 0 1 0 14" /><path d="M5 15v-6a1 1 0 0 1 1.555 -.832l4.445 3.832v.001a1 1 0 0 1 0 1.598l-4.445 3.401v.001a1 1 0 0 1 -1.555 -.832" /></svg>
+                        <span data-translate-key="generateVoiceover">生成配音</span>
+                    </button>
+                    <button class="action-button download-voiceover" disabled>
+                        <svg viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2" /><path d="M7 11l5 5l5 -5" /><path d="M12 4l0 12" /></svg>
+                        <span data-translate-key="downloadVoiceover">下载配音</span>
+                    </button>
                     <button class="action-button export-video">
                         <svg viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M15 10l4.553 -2.276a1 1 0 0 1 1.447 .894v6.764a1 1 0 0 1 -1.447 .894l-4.553 -2.276v-4z" /><path d="M3 6m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z" /></svg>
                         <span data-translate-key="exportAsVideo">导出为视频</span>
                     </button>
+                </div>
+                <div class="voiceover-container empty">
+                    <p class="voiceover-placeholder" data-translate-key="voiceoverPlaceholder">生成的配音将在这里显示</p>
                 </div>
             </div>
         </div>
@@ -132,6 +143,30 @@
             <button id="modal-close-button" class="modal-close-button" title="Close">×</button>
             <p data-translate-key="featureComingSoon">该功能正在开发中...</p>
             <button id="modal-github-button" class="modal-button" data-translate-key="visitGitHub">访问 GitHub</button>
+        </div>
+    </div>
+
+    <div id="voiceover-modal" class="modal-overlay">
+        <div class="modal-content voiceover-modal-content">
+            <button id="voiceover-close-button" class="modal-close-button" title="Close">×</button>
+            <h2 data-translate-key="voiceoverModalTitle">生成动画配音</h2>
+            <p data-translate-key="voiceoverModalDescription">输入旁白文本并上传说话人参考音频，系统会调用 TTS 服务生成配音。</p>
+            <form id="voiceover-form">
+                <label class="voiceover-field">
+                    <span data-translate-key="voiceoverTextLabel">旁白文本</span>
+                    <textarea id="voiceover-text" rows="4" required></textarea>
+                </label>
+                <label class="voiceover-field">
+                    <span data-translate-key="voiceoverVoiceLabel">说话人参考音频</span>
+                    <input id="voiceover-speaker" type="file" accept="audio/*" required>
+                </label>
+                <label class="voiceover-field optional">
+                    <span data-translate-key="voiceoverEmotionLabel">情感参考音频（可选）</span>
+                    <input id="voiceover-emo" type="file" accept="audio/*">
+                </label>
+                <p id="voiceover-status" class="voiceover-status"></p>
+                <button id="voiceover-submit-button" type="submit" class="modal-button" data-translate-key="voiceoverGenerateButton">开始生成</button>
+            </form>
         </div>
     </div>
 

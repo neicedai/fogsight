@@ -71,9 +71,10 @@
 
 ## 核心功能
 
-* **概念即影像**: 输入一个主题，Fogsight 将为您生成一部叙事完整的高水平动画，包含双语旁白与电影级的视觉质感。  
-* **智能编排**: Fogsight 的核心是其强大的LLM驱动的编排能力。从旁白、视觉元素到动态效果，AI 将自动完成整个创作流程，一气呵成。  
-* **语言用户界面 (LUI)**: 通过与 AI 的多轮对话，您可以对动画进行精准调优和迭代，直至达到您心中最理想的艺术效果。  
+* **概念即影像**: 输入一个主题，Fogsight 将为您生成一部叙事完整的高水平动画，包含双语旁白与电影级的视觉质感。
+* **智能编排**: Fogsight 的核心是其强大的LLM驱动的编排能力。从旁白、视觉元素到动态效果，AI 将自动完成整个创作流程，一气呵成。
+* **语言用户界面 (LUI)**: 通过与 AI 的多轮对话，您可以对动画进行精准调优和迭代，直至达到您心中最理想的艺术效果。
+* **一键生成配音**: 在动画播放器中点击“生成配音”，上传说话人参考音频后即可通过 TTS 服务生成旁白，并直接在线预览或下载。
 
 ## 快速上手
 
@@ -97,12 +98,14 @@
    pip install -r requirements.txt
    ```
 
-3. **配置API密钥:**
+3. **配置API密钥与配音服务:**
 
    ```bash
    cp demo-credentials.json credentials.json
    # 复制 demo-credentials.json 文件并重命名为 credentials.json
    # 编辑 credentials.json 文件，填入您的 API_KEY 和 BASE_URL。
+   # 若要启用“生成配音”按钮，请额外添加 TTS_BASE_URL 指向运行中的 tts.py 服务，例如：
+   # "TTS_BASE_URL": "http://127.0.0.1:9000"
    # **请注意**，我们使用的是与 OpenAI 兼容的 SDK，但您仍应使用Gemini 2.5 pro
    ```
 
@@ -130,7 +133,7 @@
    cd fogsight
    ```
 
-3. **配置API密钥:**
+3. **配置API密钥（可选配置配音服务）:**
    ```bash
    cp demo-credentials.json credentials.json
    # 编辑 credentials.json 文件，填入您的 API_KEY、BASE_URL 和 MODEL
@@ -148,6 +151,7 @@
    #   "BASE_URL": "",
    #   "MODEL": "gemini-2.5-pro"
    # }
+   # 如果需要在容器内启用配音按钮，可同时设置 TTS_BASE_URL 指向运行 tts.py 的地址
    ```
 
 4. **使用 Docker Compose 启动:**

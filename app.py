@@ -4,9 +4,10 @@ import os
 from datetime import datetime
 from typing import AsyncGenerator, List, Optional
 
+import httpx
 import pytz
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI, OpenAIError
 from pydantic import BaseModel
@@ -49,6 +50,8 @@ else:
 
 if API_KEY.startswith("sk-REPLACE_ME"):
     raise RuntimeError("请在环境变量里配置 API_KEY")
+
+TTS_BASE_URL = credentials.get("TTS_BASE_URL") or os.getenv("TTS_BASE_URL")
 
 templates = Jinja2Templates(directory="templates")
 
@@ -184,6 +187,57 @@ async def generate(
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(wrapped_stream(), headers=headers)
+
+
+@app.post("/voiceover")
+async def generate_voiceover(
+    text: str = Form(...),
+    speaker_audio: UploadFile = File(...),
+    emo_audio: Optional[UploadFile] = File(None),
+):
+    """Proxy text-to-speech requests to the configured TTS service."""
+
+    if not TTS_BASE_URL:
+        raise HTTPException(status_code=503, detail="TTS service is not configured.")
+
+    tts_endpoint = TTS_BASE_URL.rstrip("/") + "/tts"
+
+    try:
+        speaker_bytes = await speaker_audio.read()
+        files = {
+            "speaker_audio": (
+                speaker_audio.filename or "prompt.wav",
+                speaker_bytes,
+                speaker_audio.content_type or "audio/wav",
+            )
+        }
+        if emo_audio is not None:
+            emo_bytes = await emo_audio.read()
+            files["emo_audio"] = (
+                emo_audio.filename or "emotion.wav",
+                emo_bytes,
+                emo_audio.content_type or "audio/wav",
+            )
+
+        async with httpx.AsyncClient(timeout=None) as client:
+            response = await client.post(tts_endpoint, data={"text": text}, files=files)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"TTS request failed: {exc}") from exc
+
+    if response.status_code != 200:
+        detail = response.text
+        try:
+            detail_json = response.json()
+            detail = detail_json.get("detail") or detail_json.get("error") or detail
+        except ValueError:
+            pass
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    headers = {
+        "Content-Disposition": "attachment; filename=voiceover.wav",
+        "Content-Type": response.headers.get("content-type", "audio/wav"),
+    }
+    return Response(content=response.content, headers=headers)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_index(request: Request):
