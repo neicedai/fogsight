@@ -54,6 +54,7 @@ else:
 if API_KEY.startswith("sk-REPLACE_ME"):
     raise RuntimeError("请在环境变量里配置 API_KEY")
 
+
 def _get_config_value(key: str, default=None):
     value = credentials.get(key)
     if value in ("", None):
@@ -61,30 +62,6 @@ def _get_config_value(key: str, default=None):
     if value in ("", None):
         return default
     return value
-
-
-def _parse_bool(value, default: Optional[bool] = None) -> Optional[bool]:
-    if value in (None, ""):
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    lowered = str(value).strip().lower()
-    if lowered in {"true", "1", "yes", "y", "on"}:
-        return True
-    if lowered in {"false", "0", "no", "n", "off"}:
-        return False
-    return default
-
-
-def _safe_cast(value, cast_type, default=None):
-    if value in (None, ""):
-        return default
-    try:
-        return cast_type(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _resolve_config_path(raw_path: Optional[str]) -> Optional[Path]:
@@ -96,50 +73,58 @@ def _resolve_config_path(raw_path: Optional[str]) -> Optional[Path]:
     return path
 
 
+TTS_BASE_URL = _get_config_value("TTS_BASE_URL")
 INDEXTTS_API_URL = _get_config_value("INDEXTTS_API_URL")
-LEGACY_TTS_BASE_URL = _get_config_value("TTS_BASE_URL")
 TTS_ENDPOINT_URL = None
 if INDEXTTS_API_URL:
     normalized = INDEXTTS_API_URL.rstrip("/")
     if not normalized.lower().endswith("/tts"):
         normalized = normalized + "/tts"
     TTS_ENDPOINT_URL = normalized
-elif LEGACY_TTS_BASE_URL:
-    TTS_ENDPOINT_URL = LEGACY_TTS_BASE_URL.rstrip("/") + "/tts"
+elif TTS_BASE_URL:
+    TTS_ENDPOINT_URL = TTS_BASE_URL.rstrip("/") + "/tts"
 
-INDEXTTS_TIMEOUT = _safe_cast(_get_config_value("INDEXTTS_TIMEOUT"), float, default=None)
+raw_timeout = _get_config_value("INDEXTTS_TIMEOUT")
+try:
+    INDEXTTS_TIMEOUT = float(raw_timeout) if raw_timeout not in (None, "") else None
+except (TypeError, ValueError):
+    INDEXTTS_TIMEOUT = None
 
 DEFAULT_SPEAKER_AUDIO_PATH = _resolve_config_path(
     _get_config_value("DEFAULT_SPEAKER_AUDIO_PATH")
+    or _get_config_value("INDEXTTS_PROMPT_WAV")
 )
-INDEXTTS_PROMPT_WAV_PATH = _resolve_config_path(_get_config_value("INDEXTTS_PROMPT_WAV"))
-if DEFAULT_SPEAKER_AUDIO_PATH is None and INDEXTTS_PROMPT_WAV_PATH is not None:
-    DEFAULT_SPEAKER_AUDIO_PATH = INDEXTTS_PROMPT_WAV_PATH
-
 DEFAULT_EMO_AUDIO_PATH = _resolve_config_path(
     _get_config_value("DEFAULT_EMO_AUDIO_PATH")
 )
 
-INDEXTTS_DEFAULT_EMOTION = (
-    str(_get_config_value("INDEXTTS_EMOTION", "neutral")).strip().lower()
-)
+INDEXTTS_DEFAULT_EMOTION = str(
+    _get_config_value("INDEXTTS_EMOTION", "neutral") or "neutral"
+).strip().lower()
+
 
 def _collect_common_tts_form_data() -> Dict[str, object]:
-    mapping = {
-        "use_random": _parse_bool(_get_config_value("INDEXTTS_USE_RANDOM"), default=False),
-        "interval_silence": _safe_cast(_get_config_value("INDEXTTS_INTERVAL_SILENCE"), int),
-        "max_text_tokens_per_segment": _safe_cast(
-            _get_config_value("INDEXTTS_MAX_TEXT_TOKENS"), int
-        ),
-        "temperature": _safe_cast(_get_config_value("INDEXTTS_TEMPERATURE"), float),
-        "top_p": _safe_cast(_get_config_value("INDEXTTS_TOP_P"), float),
-        "top_k": _safe_cast(_get_config_value("INDEXTTS_TOP_K"), int),
-        "repetition_penalty": _safe_cast(
-            _get_config_value("INDEXTTS_REPETITION_PENALTY"), float
-        ),
-        "max_mel_tokens": _safe_cast(_get_config_value("INDEXTTS_MAX_MEL_TOKENS"), int),
+    value_specs = {
+        "INDEXTTS_USE_RANDOM": lambda v: str(v).strip().lower() in {"true", "1", "yes", "y"},
+        "INDEXTTS_INTERVAL_SILENCE": int,
+        "INDEXTTS_MAX_TEXT_TOKENS": int,
+        "INDEXTTS_TEMPERATURE": float,
+        "INDEXTTS_TOP_P": float,
+        "INDEXTTS_TOP_K": int,
+        "INDEXTTS_REPETITION_PENALTY": float,
+        "INDEXTTS_MAX_MEL_TOKENS": int,
     }
-    return {k: v for k, v in mapping.items() if v is not None}
+    data: Dict[str, object] = {}
+    for key, caster in value_specs.items():
+        raw_value = _get_config_value(key)
+        if raw_value in (None, ""):
+            continue
+        try:
+            data_key = key.replace("INDEXTTS_", "").lower()
+            data[data_key] = caster(raw_value)
+        except (TypeError, ValueError):
+            continue
+    return data
 
 
 INDEXTTS_COMMON_FORM_DATA = _collect_common_tts_form_data()
@@ -154,8 +139,8 @@ def _collect_emotion_configs() -> Dict[str, Dict[str, object]]:
         "INDEXTTS_EMO_WAV_": "emo_audio_path",
         "INDEXTTS_EMO_TEXT_": "emo_text",
         "INDEXTTS_EMO_VECTOR_JSON_": "emo_vector_json",
-        "INDEXTTS_EMO_ALPHA_": "emo_alpha",
         "INDEXTTS_USE_EMO_TEXT_": "use_emo_text",
+        "INDEXTTS_EMO_ALPHA_": "emo_alpha",
     }
 
     for prefix, field_name in prefix_map.items():
@@ -170,9 +155,12 @@ def _collect_emotion_configs() -> Dict[str, Dict[str, object]]:
             if field_name == "emo_audio_path":
                 entry[field_name] = _resolve_config_path(value)
             elif field_name == "emo_alpha":
-                entry[field_name] = _safe_cast(value, float)
+                try:
+                    entry[field_name] = float(value)
+                except (TypeError, ValueError):
+                    continue
             elif field_name == "use_emo_text":
-                entry[field_name] = _parse_bool(value, default=None)
+                entry[field_name] = str(value).strip().lower() in {"true", "1", "yes", "y"}
             else:
                 entry[field_name] = value
 
@@ -180,32 +168,6 @@ def _collect_emotion_configs() -> Dict[str, Dict[str, object]]:
 
 
 INDEXTTS_EMOTION_CONFIGS = _collect_emotion_configs()
-
-
-def _load_audio_file(path: Path, error_detail: str) -> Tuple[str, bytes, str]:
-    if not path.exists():
-        raise HTTPException(status_code=500, detail=error_detail)
-    try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=error_detail) from exc
-    return (path.name, data, "audio/wav")
-
-
-def _load_text_reference(value: str, error_detail: str) -> str:
-    resolved_path = _resolve_config_path(value)
-    if resolved_path and resolved_path.exists():
-        try:
-            return resolved_path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=error_detail) from exc
-    if isinstance(value, str):
-        looks_like_path = any(sep in value for sep in ("/", "\\")) or value.lower().endswith(
-            (".txt", ".json", ".wav")
-        )
-        if resolved_path and looks_like_path and not resolved_path.exists():
-            raise HTTPException(status_code=500, detail=error_detail)
-    return value
 
 templates = Jinja2Templates(directory="templates")
 
@@ -348,6 +310,26 @@ async def generate(
     return StreamingResponse(wrapped_stream(), headers=headers)
 
 
+def _load_audio_file(path: Path, error_detail: str) -> Tuple[str, bytes, str]:
+    if not path or not path.exists():
+        raise HTTPException(status_code=500, detail=error_detail)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=error_detail) from exc
+    return (path.name, data, "audio/wav")
+
+
+def _load_text_reference(value: str, error_detail: str) -> str:
+    resolved_path = _resolve_config_path(value)
+    if resolved_path and resolved_path.exists():
+        try:
+            return resolved_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=error_detail) from exc
+    return value
+
+
 def _serialize_form_data(data: Dict[str, object]) -> Dict[str, str]:
     serialized: Dict[str, str] = {}
     for key, value in data.items():
@@ -372,22 +354,24 @@ async def _forward_tts_request(
     if not TTS_ENDPOINT_URL:
         raise HTTPException(status_code=503, detail="TTS service is not configured.")
 
-    tts_endpoint = TTS_ENDPOINT_URL
     files = {"speaker_audio": speaker_file}
     if emo_file is not None:
         files["emo_audio"] = emo_file
 
-    form_data = {"text": text}
+    form_data: Dict[str, object] = {"text": text}
     if INDEXTTS_COMMON_FORM_DATA:
         form_data.update(INDEXTTS_COMMON_FORM_DATA)
     if extra_form_data:
         form_data.update(extra_form_data)
 
+    timeout = None
+    if INDEXTTS_TIMEOUT is not None:
+        timeout = httpx.Timeout(INDEXTTS_TIMEOUT)
+
     try:
-        timeout = None if INDEXTTS_TIMEOUT is None else httpx.Timeout(INDEXTTS_TIMEOUT)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
-                tts_endpoint,
+                TTS_ENDPOINT_URL,
                 data=_serialize_form_data(form_data),
                 files=files,
             )
@@ -454,6 +438,7 @@ async def generate_auto_voiceover(payload: AutoVoiceoverRequest):
 
     emotion_key = INDEXTTS_DEFAULT_EMOTION or ""
     emotion_config = INDEXTTS_EMOTION_CONFIGS.get(emotion_key)
+
     emo_tuple: Optional[Tuple[str, bytes, str]] = None
     extra_form_data: Dict[str, object] = {}
 

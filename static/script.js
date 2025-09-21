@@ -36,10 +36,6 @@ document.addEventListener('DOMContentLoaded', () => {
         errorTooManyRequests: {zh: "今天已经使用太多，请明天再试", en: "Too many requests today. Please try again tomorrow."},
         errorLLMParseError: {zh: "返回的动画代码解析失败，请调整提示词重新生成。", en: "Failed to parse the returned animation code. Please adjust your prompt and try again."},
         voiceoverPlaceholder: { zh: "生成的配音将在这里显示", en: "Generated voiceover will appear here." },
-        voiceoverAutoGenerating: { zh: "自动配音生成中...", en: "Generating Chinese voiceover..." },
-        voiceoverAutoReady: { zh: "自动配音已生成", en: "Chinese voiceover ready" },
-        voiceoverAutoFailed: { zh: "自动配音失败", en: "Auto voiceover failed." },
-        voiceoverAutoSubtitleMissing: { zh: "未识别到中文字幕，无法生成配音。", en: "No Chinese subtitles detected. Unable to create voiceover." },
         voiceoverModalTitle: { zh: "生成动画配音", en: "Generate Animation Voiceover" },
         voiceoverModalDescription: { zh: "输入旁白文本并上传说话人参考音频，系统会调用 TTS 服务生成配音。", en: "Provide narration text and a speaker reference audio to generate a voiceover via the TTS service." },
         voiceoverTextLabel: { zh: "旁白文本", en: "Narration text" },
@@ -55,7 +51,24 @@ document.addEventListener('DOMContentLoaded', () => {
         voiceoverTextRequired: { zh: "请输入要朗读的文本。", en: "Please enter narration text." },
     };
 
-    const CHINESE_CHAR_REGEX = /[\u3400-\u9fff]/;
+    Object.assign(translations, {
+        voiceoverAutoGenerating: {
+            zh: "自动配音生成中...",
+            en: "Generating Chinese voiceover...",
+        },
+        voiceoverAutoReady: {
+            zh: "自动配音已生成",
+            en: "Chinese voiceover ready",
+        },
+        voiceoverAutoFailed: {
+            zh: "自动配音失败",
+            en: "Auto voiceover failed",
+        },
+        voiceoverAutoSubtitleMissing: {
+            zh: "未识别到中文字幕，无法生成配音。",
+            en: "No Chinese subtitles detected. Unable to generate voiceover.",
+        },
+    });
 
     let currentLang = config.defaultLang;
     const body = document.body;
@@ -101,164 +114,12 @@ document.addEventListener('DOMContentLoaded', () => {
     let activeVoiceoverPlayer = null;
     let activeVoiceoverTopic = '';
     const playerVoiceoverMap = new WeakMap();
+    const CHINESE_CHAR_REGEX = /[\u4E00-\u9FFF]/;
 
     function resetVoiceoverStatus() {
         if (!voiceoverStatus) return;
         voiceoverStatus.textContent = '';
         voiceoverStatus.className = 'voiceover-status';
-    }
-
-    function setVoiceoverButtonTranslation(button, key) {
-        if (!button) return;
-        const label = button.querySelector('span[data-translate-key]');
-        if (!label) return;
-        if (key) label.dataset.translateKey = key;
-        const translation = translations[key]?.[currentLang];
-        if (translation) label.textContent = translation;
-    }
-
-    function updateVoiceoverStatus(playerElement, translationKey, stateClass = '', customText = null) {
-        if (!playerElement) return;
-        const container = playerElement.querySelector('.voiceover-container');
-        if (!container) return;
-        container.classList.remove('empty', 'loading', 'error', 'success');
-        if (stateClass) container.classList.add(stateClass);
-        const message = customText ?? translations[translationKey]?.[currentLang] ?? '';
-        const placeholder = document.createElement('p');
-        placeholder.className = 'voiceover-placeholder';
-        if (translationKey) {
-            placeholder.dataset.translateKey = translationKey;
-        }
-        placeholder.textContent = message;
-        container.innerHTML = '';
-        container.appendChild(placeholder);
-    }
-
-    function extractChineseNarrationFromHtml(htmlContent) {
-        if (!htmlContent) return '';
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(htmlContent, 'text/html');
-        if (!doc) return '';
-
-        const selectors = [
-            '[data-subtitle]',
-            '[data-caption]',
-            '.subtitle',
-            '.subtitles',
-            '.captions',
-            '.caption',
-            '[class*="subtitle"]',
-            '[class*="caption"]',
-            '[id*="subtitle"]',
-            '[id*="caption"]',
-        ];
-
-        const seen = new Set();
-        const segments = [];
-
-        const collectText = (rawText) => {
-            if (!rawText) return;
-            const normalized = rawText.replace(/\s+/g, ' ').trim();
-            if (!normalized) return;
-            if (!CHINESE_CHAR_REGEX.test(normalized)) return;
-            const chineseParts = normalized.match(/[\u3400-\u9fff0-9\u3000-\u303F\uFF00-\uFFEF，。、！？：；“”‘’（）·—…\s]+/g);
-            const chineseText = chineseParts ? chineseParts.join('').replace(/\s+/g, ' ').trim() : '';
-            if (!chineseText || !CHINESE_CHAR_REGEX.test(chineseText)) return;
-            if (seen.has(chineseText)) return;
-            seen.add(chineseText);
-            segments.push(chineseText);
-        };
-
-        const candidateElements = new Set();
-        selectors.forEach((selector) => {
-            doc.querySelectorAll(selector).forEach((el) => candidateElements.add(el));
-        });
-
-        candidateElements.forEach((el) => collectText(el.textContent || ''));
-
-        if (segments.length === 0) {
-            const walker = doc.createTreeWalker(doc.body || doc, NodeFilter.SHOW_TEXT, null);
-            let node;
-            while ((node = walker.nextNode())) {
-                const parentTag = node.parentElement?.tagName?.toLowerCase();
-                if (parentTag && ['script', 'style'].includes(parentTag)) continue;
-                collectText(node.textContent || '');
-            }
-        }
-
-        const combined = segments.join('\n');
-        return combined.length > 4000 ? combined.slice(0, 4000) : combined;
-    }
-
-    function buildHtmlWithVoiceover(htmlContent, playerElement) {
-        if (!htmlContent || !playerElement) return htmlContent;
-        const voiceoverData = playerVoiceoverMap.get(playerElement);
-        if (!voiceoverData?.dataUrl) return htmlContent;
-
-        const audioTag = `<audio src="${voiceoverData.dataUrl}" autoplay preload="auto" data-generated="fogsight-voiceover"></audio>`;
-        if (htmlContent.includes('data-generated="fogsight-voiceover"')) {
-            return htmlContent;
-        }
-
-        if (htmlContent.includes('</body>')) {
-            return htmlContent.replace('</body>', `${audioTag}\n</body>`);
-        }
-
-        return `${htmlContent}\n${audioTag}`;
-    }
-
-    async function autoGenerateVoiceoverForPlayer(playerElement, htmlContent, topic) {
-        if (!playerElement) return;
-        const voiceoverButton = playerElement.querySelector('.generate-voiceover');
-        setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoGenerating');
-        if (voiceoverButton) {
-            voiceoverButton.disabled = true;
-            voiceoverButton.classList.add('disabled');
-        }
-
-        updateVoiceoverStatus(playerElement, 'voiceoverAutoGenerating', 'loading');
-
-        const narrationText = extractChineseNarrationFromHtml(htmlContent);
-        if (!narrationText) {
-            updateVoiceoverStatus(playerElement, 'voiceoverAutoSubtitleMissing', 'error');
-            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoFailed');
-            return;
-        }
-
-        try {
-            const response = await fetch(`${config.apiBaseUrl}/voiceover/auto`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: narrationText, topic: topic || '' }),
-            });
-
-            if (!response.ok) {
-                const errorBody = await response.text();
-                let errorMessage = translations.voiceoverAutoFailed[currentLang] || '';
-                try {
-                    const parsed = JSON.parse(errorBody);
-                    if (parsed?.detail) errorMessage = parsed.detail;
-                } catch (parseError) {
-                    if (errorBody) errorMessage = errorBody;
-                }
-                updateVoiceoverStatus(playerElement, null, 'error', errorMessage);
-                setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoFailed');
-                showWarning(errorMessage);
-                return;
-            }
-
-            const blob = await response.blob();
-            await attachVoiceoverToPlayer(playerElement, blob, topic || narrationText);
-            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoReady');
-        } catch (error) {
-            console.error('Auto voiceover generation failed:', error);
-            const fallbackMessage = translations.voiceoverServiceUnavailable[currentLang]
-                || translations.voiceoverAutoFailed[currentLang]
-                || 'Voiceover service is unavailable.';
-            updateVoiceoverStatus(playerElement, null, 'error', fallbackMessage);
-            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoFailed');
-            showWarning(fallbackMessage);
-        }
     }
 
     function openVoiceoverModal(playerElement, topic) {
@@ -281,24 +142,58 @@ document.addEventListener('DOMContentLoaded', () => {
         voiceoverModal.classList.remove('visible');
     }
 
-    function blobToDataUrl(blob) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-        });
+    function setVoiceoverButtonTranslation(button, translationKey) {
+        if (!button) return;
+        const textSpan = button.querySelector('[data-translate-key]') || button;
+        const translation = translations[translationKey]?.[currentLang];
+        if (textSpan.dataset) textSpan.dataset.translateKey = translationKey;
+        if (translation) {
+            textSpan.textContent = translation;
+        }
     }
 
-    async function attachVoiceoverToPlayer(playerElement, blob, topic) {
+    function updateVoiceoverStatus(playerElement, translationKey, stateClass) {
+        const container = playerElement?.querySelector('.voiceover-container');
+        if (!container) return;
+        container.classList.remove('loading', 'error', 'success');
+        if (stateClass) container.classList.add(stateClass);
+        const placeholder = container.querySelector('.voiceover-placeholder');
+        const translation = translations[translationKey]?.[currentLang];
+        if (placeholder && translation) {
+            placeholder.textContent = translation;
+            placeholder.dataset.translateKey = translationKey;
+        }
+    }
+
+    function storeVoiceoverForPlayer(playerElement, blob, topic, objectUrl) {
+        const record = {
+            blob,
+            objectUrl,
+            topic: topic || '',
+            dataUrl: null,
+        };
+        playerVoiceoverMap.set(playerElement, record);
+        return record;
+    }
+
+    function revokeVoiceoverObjectUrl(playerElement) {
+        const record = playerVoiceoverMap.get(playerElement);
+        if (record?.objectUrl) {
+            URL.revokeObjectURL(record.objectUrl);
+        }
+    }
+
+    function attachVoiceoverToPlayer(playerElement, blob, topic, options = {}) {
+        const {
+            autoplay = false,
+            successTranslationKey = 'voiceoverAutoReady',
+        } = options;
         if (!playerElement || !blob) return;
         const container = playerElement.querySelector('.voiceover-container');
         if (!container) return;
 
-        const previousAudio = container.querySelector('audio');
-        if (previousAudio?.dataset?.objectUrl) {
-            URL.revokeObjectURL(previousAudio.dataset.objectUrl);
-        }
+        revokeVoiceoverObjectUrl(playerElement);
+        container.classList.remove('loading', 'error');
 
         const objectUrl = URL.createObjectURL(blob);
         const audioElement = document.createElement('audio');
@@ -306,31 +201,150 @@ document.addEventListener('DOMContentLoaded', () => {
         audioElement.src = objectUrl;
         audioElement.dataset.objectUrl = objectUrl;
         audioElement.setAttribute('preload', 'auto');
-        audioElement.dataset.language = 'zh';
-        audioElement.autoplay = true;
+        if (autoplay) {
+            audioElement.autoplay = true;
+        }
 
         container.innerHTML = '';
         container.appendChild(audioElement);
-        container.classList.remove('empty', 'loading', 'error');
+        container.classList.remove('empty');
         container.classList.add('success');
 
+        storeVoiceoverForPlayer(playerElement, blob, topic, objectUrl);
         const downloadButton = playerElement.querySelector('.download-voiceover');
         if (downloadButton) {
             downloadButton.disabled = false;
         }
+        updateVoiceoverStatus(playerElement, successTranslationKey, 'success');
+    }
 
+    async function convertBlobToDataUrl(blob) {
+        return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    async function ensureVoiceoverDataUrl(playerElement) {
+        const record = playerVoiceoverMap.get(playerElement);
+        if (!record?.blob) return null;
+        if (record.dataUrl) return record.dataUrl;
         try {
-            await audioElement.play();
-        } catch (playbackError) {
-            console.debug('Autoplay for generated voiceover was blocked by the browser.', playbackError);
+            record.dataUrl = await convertBlobToDataUrl(record.blob);
+            playerVoiceoverMap.set(playerElement, record);
+            return record.dataUrl;
+        } catch (error) {
+            console.error('Failed to convert voiceover blob to data URL for embedding.', error);
+            return null;
+        }
+    }
+
+    async function buildHtmlWithVoiceover(htmlContent, playerElement) {
+        if (!playerElement) return htmlContent;
+        const dataUrl = await ensureVoiceoverDataUrl(playerElement);
+        if (!dataUrl) return htmlContent;
+        if (htmlContent.includes('data-generated="fogsight-voiceover"')) return htmlContent;
+        const audioTag = `<audio src="${dataUrl}" autoplay preload="auto" data-generated="fogsight-voiceover"></audio>`;
+        if (htmlContent.includes('</body>')) {
+            return htmlContent.replace('</body>', `${audioTag}</body>`);
+        }
+        return `${htmlContent}${audioTag}`;
+    }
+
+    function extractChineseNarrationFromHtml(htmlContent) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlContent, 'text/html');
+        const collected = [];
+        const seen = new Set();
+        const selectors = [
+            '[data-subtitle-zh]',
+            '.subtitle-zh',
+            '.zh-subtitle',
+            '.cn-subtitle',
+            '.subtitle .zh',
+            '.subtitle.zh',
+            'p',
+            'span',
+        ];
+
+        for (const selector of selectors) {
+            const elements = doc.querySelectorAll(selector);
+            elements.forEach((element) => {
+                const text = (element.textContent || '').trim();
+                if (!text || !CHINESE_CHAR_REGEX.test(text)) return;
+                const normalized = text.replace(/\s+/g, '');
+                if (normalized.length < 6 || seen.has(normalized)) return;
+                seen.add(normalized);
+                collected.push(text);
+            });
+            if (collected.length > 0 && selector === '[data-subtitle-zh]') {
+                break;
+            }
+        }
+
+        const narration = collected.join(' ');
+        return narration.length > 0 ? narration.slice(0, 1800) : '';
+    }
+
+    async function autoGenerateVoiceoverForPlayer(playerElement, htmlContent, topic) {
+        const voiceoverButton = playerElement.querySelector('.generate-voiceover');
+        if (voiceoverButton) {
+            voiceoverButton.disabled = true;
+            voiceoverButton.classList.add('disabled');
+            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoGenerating');
+        }
+        updateVoiceoverStatus(playerElement, 'voiceoverAutoGenerating', 'loading');
+
+        const narrationText = extractChineseNarrationFromHtml(htmlContent);
+        if (!narrationText) {
+            updateVoiceoverStatus(playerElement, 'voiceoverAutoSubtitleMissing', 'error');
+            if (voiceoverButton) {
+                voiceoverButton.disabled = false;
+                voiceoverButton.classList.remove('disabled');
+                setVoiceoverButtonTranslation(voiceoverButton, 'generateVoiceover');
+            }
+            return;
         }
 
         try {
-            const dataUrl = await blobToDataUrl(blob);
-            playerVoiceoverMap.set(playerElement, { blob, dataUrl, topic });
-        } catch (conversionError) {
-            console.error('Failed to convert voiceover blob to data URL for embedding.', conversionError);
-            playerVoiceoverMap.set(playerElement, { blob, dataUrl: null, topic });
+            const response = await fetch(`${config.apiBaseUrl}/voiceover/auto`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: narrationText, topic }),
+            });
+
+            if (!response.ok) {
+                if (response.status === 503) {
+                    updateVoiceoverStatus(playerElement, 'voiceoverServiceUnavailable', 'error');
+                } else {
+                    updateVoiceoverStatus(playerElement, 'voiceoverAutoFailed', 'error');
+                }
+                if (voiceoverButton) {
+                    voiceoverButton.disabled = false;
+                    voiceoverButton.classList.remove('disabled');
+                    setVoiceoverButtonTranslation(voiceoverButton, 'generateVoiceover');
+                }
+                console.error('Auto voiceover request failed:', await response.text());
+                return;
+            }
+
+            const blob = await response.blob();
+            attachVoiceoverToPlayer(playerElement, blob, topic, { autoplay: true });
+            if (voiceoverButton) {
+                voiceoverButton.disabled = false;
+                voiceoverButton.classList.remove('disabled');
+                setVoiceoverButtonTranslation(voiceoverButton, 'generateVoiceover');
+            }
+        } catch (error) {
+            console.error('Auto voiceover generation encountered an unexpected error:', error);
+            updateVoiceoverStatus(playerElement, 'voiceoverAutoFailed', 'error');
+            if (voiceoverButton) {
+                voiceoverButton.disabled = false;
+                voiceoverButton.classList.remove('disabled');
+                setVoiceoverButtonTranslation(voiceoverButton, 'generateVoiceover');
+            }
         }
     }
 
@@ -535,28 +549,34 @@ document.addEventListener('DOMContentLoaded', () => {
         const iframe = playerElement.querySelector('.animation-iframe');
         iframe.srcdoc = htmlContent;
 
-        const buildExportHtml = () => buildHtmlWithVoiceover(htmlContent, playerElement);
+        const openButton = playerElement.querySelector('.open-new-window');
+        if (openButton) {
+            openButton.addEventListener('click', async () => {
+                const finalHtml = await buildHtmlWithVoiceover(htmlContent, playerElement);
+                const blob = new Blob([finalHtml], { type: 'text/html' });
+                window.open(URL.createObjectURL(blob), '_blank');
+            });
+        }
 
-        playerElement.querySelector('.open-new-window').addEventListener('click', () => {
-            const finalHtml = buildExportHtml();
-            const blob = new Blob([finalHtml], { type: 'text/html' });
-            window.open(URL.createObjectURL(blob), '_blank');
-        });
-        playerElement.querySelector('.save-html').addEventListener('click', () => {
-            const finalHtml = buildExportHtml();
-            const blob = new Blob([finalHtml], { type: 'text/html' });
-            const url = URL.createObjectURL(blob);
-            const a = Object.assign(document.createElement('a'), { href: url, download: `${topic.replace(/\s/g, '_') || 'animation'}.html` });
-            document.body.appendChild(a);
-            a.click();
-            URL.revokeObjectURL(url);
-            a.remove();
-        });
+        const saveButton = playerElement.querySelector('.save-html');
+        if (saveButton) {
+            saveButton.addEventListener('click', async () => {
+                const finalHtml = await buildHtmlWithVoiceover(htmlContent, playerElement);
+                const blob = new Blob([finalHtml], { type: 'text/html' });
+                const url = URL.createObjectURL(blob);
+                const safeTopic = (topic || 'animation').replace(/\s/g, '_');
+                const a = Object.assign(document.createElement('a'), { href: url, download: `${safeTopic || 'animation'}.html` });
+                document.body.appendChild(a);
+                a.click();
+                URL.revokeObjectURL(url);
+                a.remove();
+            });
+        }
         const voiceoverButton = playerElement.querySelector('.generate-voiceover');
         if (voiceoverButton) {
-            voiceoverButton.disabled = true;
-            voiceoverButton.classList.add('disabled');
-            setVoiceoverButtonTranslation(voiceoverButton, 'voiceoverAutoGenerating');
+            voiceoverButton.addEventListener('click', () => {
+                openVoiceoverModal(playerElement, topic);
+            });
         }
         const downloadVoiceoverButton = playerElement.querySelector('.download-voiceover');
         if (downloadVoiceoverButton) {
@@ -586,7 +606,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chatLog.appendChild(playerElement);
         scrollToBottom();
         autoGenerateVoiceoverForPlayer(playerElement, htmlContent, topic).catch((error) => {
-            console.error('Auto voiceover generation encountered an unexpected error:', error);
+            console.error('Auto voiceover generation failed:', error);
         });
     }
 
@@ -759,7 +779,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
 
                     const blob = await response.blob();
-                    await attachVoiceoverToPlayer(activeVoiceoverPlayer, blob, activeVoiceoverTopic || narrationText);
+                    attachVoiceoverToPlayer(
+                        activeVoiceoverPlayer,
+                        blob,
+                        activeVoiceoverTopic || narrationText,
+                        { successTranslationKey: 'voiceoverSuccessStatus' }
+                    );
                     if (voiceoverStatus) {
                         voiceoverStatus.textContent = translations.voiceoverSuccessStatus[currentLang];
                         voiceoverStatus.classList.add('success');
