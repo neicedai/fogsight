@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
@@ -101,6 +102,10 @@ DEFAULT_EMO_AUDIO_PATH = _resolve_config_path(
 INDEXTTS_DEFAULT_EMOTION = str(
     _get_config_value("INDEXTTS_EMOTION", "neutral") or "neutral"
 ).strip().lower()
+
+_CHINESE_TEXT_PATTERN = re.compile(
+    r"[\u3400-\u4DBF\u4E00-\u9FFF\u3000-\u303F\uFF00-\uFFEF。，、！？；：“”（）《》〈〉—…·\s]"
+)
 
 
 def _collect_common_tts_form_data() -> Dict[str, object]:
@@ -342,6 +347,18 @@ def _serialize_form_data(data: Dict[str, object]) -> Dict[str, str]:
     return serialized
 
 
+def _filter_chinese_text(text: str) -> str:
+    if not text:
+        return ""
+
+    filtered_chars = [char for char in text if _CHINESE_TEXT_PATTERN.fullmatch(char)]
+    if not filtered_chars:
+        return ""
+
+    filtered_text = "".join(filtered_chars)
+    return " ".join(filtered_text.split())
+
+
 async def _forward_tts_request(
     text: str,
     speaker_file: Tuple[str, bytes, str],
@@ -477,7 +494,14 @@ async def generate_auto_voiceover(payload: AutoVoiceoverRequest):
             "Configured default emotion audio file was not found.",
         )
 
-    return await _forward_tts_request(payload.text, speaker_tuple, emo_tuple, extra_form_data)
+    filtered_text = _filter_chinese_text(payload.text)
+    if not filtered_text:
+        raise HTTPException(
+            status_code=400,
+            detail="Chinese narration text is required for automatic voiceover.",
+        )
+
+    return await _forward_tts_request(filtered_text, speaker_tuple, emo_tuple, extra_form_data)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_index(request: Request):
