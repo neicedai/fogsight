@@ -490,6 +490,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         throw new LLMParseError(data.error);
                     }
                     const token = data.token || '';
+                    if (token) {
+                        console.debug('Token chunk received:', token);
+                    }
 
                     if (!inCodeBlock && token.includes('```')) {
                         inCodeBlock = true;
@@ -582,6 +585,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function appendAnimationPlayer(htmlContent, topic) {
         console.log('Appending animation player with topic:', topic);
+        const trimmedHtml = (htmlContent || '').trim();
+        if (!trimmedHtml) {
+            console.error('Received empty HTML content for animation player.');
+        } else {
+            console.debug('Animation HTML length:', trimmedHtml.length);
+            console.debug('Animation HTML preview:', trimmedHtml.slice(0, 200));
+        }
         const node = templates.player.content.cloneNode(true);
         const playerElement = node.firstElementChild;
         playerElement.querySelectorAll('[data-translate-key]').forEach(el => {
