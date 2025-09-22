@@ -125,7 +125,7 @@ def _coerce_positive_float(value: Any) -> Optional[float]:
     return None
 
 
-async def _probe_audio_duration(path: Path) -> Optional[float]:
+async def _probe_stream_duration(path: Path, stream_selector: str) -> Optional[float]:
     if shutil.which("ffprobe") is None:
         return None
 
@@ -134,7 +134,7 @@ async def _probe_audio_duration(path: Path) -> Optional[float]:
         "-v",
         "error",
         "-select_streams",
-        "a:0",
+        stream_selector,
         "-show_entries",
         "stream=duration",
         "-of",
@@ -160,6 +160,14 @@ async def _probe_audio_duration(path: Path) -> Optional[float]:
         return duration if duration > 0 else None
     except (ValueError, IndexError):
         return None
+
+
+async def _probe_audio_duration(path: Path) -> Optional[float]:
+    return await _probe_stream_duration(path, "a:0")
+
+
+async def _probe_video_duration(path: Path) -> Optional[float]:
+    return await _probe_stream_duration(path, "v:0")
 
 
 async def _extract_animation_duration(page: Page) -> Optional[float]:
@@ -678,7 +686,25 @@ async def export_animation(
         if audio_path is not None and not audio_path.exists():
             audio_path = None
 
+        video_duration = await _probe_video_duration(recorded_video_path)
+        audio_duration: Optional[float] = None
+
         if audio_path is not None:
+            audio_duration = await _probe_audio_duration(audio_path)
+            audio_filters: List[str] = []
+            include_shortest = False
+            duration_tolerance = 0.05
+
+            if video_duration is not None and audio_duration is not None:
+                if audio_duration + duration_tolerance < video_duration:
+                    audio_filters.append("apad")
+                elif audio_duration > video_duration + duration_tolerance:
+                    include_shortest = True
+            else:
+                # When durations cannot be determined, prefer padding to avoid
+                # prematurely ending the muxed output.
+                audio_filters.append("apad")
+
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-y",
@@ -696,11 +722,20 @@ async def export_animation(
                 "aac",
                 "-b:a",
                 "192k",
+            ]
+
+            if audio_filters:
+                ffmpeg_cmd.extend(["-af", ",".join(audio_filters)])
+
+            ffmpeg_cmd.extend([
                 "-movflags",
                 "+faststart",
-                "-shortest",
-                str(output_path),
-            ]
+            ])
+
+            if include_shortest:
+                ffmpeg_cmd.append("-shortest")
+
+            ffmpeg_cmd.append(str(output_path))
         else:
             ffmpeg_cmd = [
                 "ffmpeg",
