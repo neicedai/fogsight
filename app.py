@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -29,6 +30,9 @@ except ModuleNotFoundError:
 # 0. 配置
 # -----------------------------------------------------------------------
 shanghai_tz = pytz.timezone("Asia/Shanghai")
+
+logging.basicConfig(level=os.getenv("FOGSIGHT_LOG_LEVEL", "INFO"))
+logger = logging.getLogger("fogsight")
 
 credentials = json.load(open("credentials.json"))
 APP_ROOT = Path(__file__).resolve().parent
@@ -352,6 +356,7 @@ async def llm_event_stream(
     history: Optional[List[dict]] = None,
     model: str = None, # Will use MODEL from config if not specified
 ) -> AsyncGenerator[str, None]:
+    logger.info("Starting LLM stream for topic: %s", topic)
     history = history or []
     
     # Use configured model if not specified
@@ -410,12 +415,14 @@ html+css+js+svg，放进一个html里"""
                 temperature=0.8, 
             )
         except OpenAIError as e:
+            logger.error("LLM stream failed: %s", e)
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return
 
         async for chunk in response:
             token = chunk.choices[0].delta.content or ""
             if token:
+                logger.debug("Streaming token chunk: %s", token)
                 payload = json.dumps({"token": token}, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
                 await asyncio.sleep(0.001)
@@ -446,6 +453,7 @@ async def generate(
                     break
                 yield chunk
         except Exception as e:
+            logger.exception("Unhandled exception during streaming for topic %s", chat_request.topic)
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 
@@ -621,8 +629,16 @@ async def export_animation(
     recorded_video_path: Optional[Path] = None
     output_path = temp_dir_path / "animation.mp4"
 
+    logger.info(
+        "Received export request: html_length=%s, audio_provided=%s, temp_dir=%s",
+        len(html),
+        bool(audio),
+        temp_dir_path,
+    )
+
     try:
         (temp_dir_path / "animation.html").write_text(html, encoding="utf-8")
+        logger.debug("Animation HTML written to %s", temp_dir_path / "animation.html")
 
         if audio is not None:
             audio_bytes = await audio.read()
@@ -637,12 +653,18 @@ async def export_animation(
                     suffix = ".wav"
                 audio_path = temp_dir_path / f"voiceover{suffix}"
                 audio_path.write_bytes(audio_bytes)
+                logger.info(
+                    "Audio attachment saved: path=%s, size=%s bytes",
+                    audio_path,
+                    audio_path.stat().st_size,
+                )
 
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
             context = None
             page = None
             video = None
+            console_messages: List[str] = []
             try:
                 context = await browser.new_context(
                     viewport={"width": 1920, "height": 1080},
@@ -650,16 +672,25 @@ async def export_animation(
                     record_video_size={"width": 1920, "height": 1080},
                 )
                 page = await context.new_page()
+                page.on("console", lambda msg: console_messages.append(f"{msg.type}: {msg.text()}"))
+                page.on("pageerror", lambda exc: console_messages.append(f"pageerror: {exc}"))
+
+                logger.debug("Setting page content for export")
                 await page.set_content(html, wait_until="networkidle")
                 await page.wait_for_timeout(500)
 
                 render_duration = await _determine_render_duration(page, audio_path)
+                logger.info("Determined render duration: %.2f seconds", render_duration)
                 wait_ms = max(0, int(render_duration * 1000))
                 if wait_ms:
+                    logger.debug("Waiting %s ms to capture animation", wait_ms)
                     await page.wait_for_timeout(wait_ms)
 
                 video = page.video
             finally:
+                if console_messages:
+                    for message in console_messages:
+                        logger.warning("Animation console: %s", message)
                 if context is not None:
                     await context.close()
                 elif page is not None:
@@ -689,11 +720,22 @@ async def export_animation(
         video_duration = await _probe_video_duration(recorded_video_path)
         audio_duration: Optional[float] = None
 
+        logger.info(
+            "Recorded video path: %s (duration=%s)",
+            recorded_video_path,
+            f"{video_duration:.2f}s" if video_duration is not None else "unknown",
+        )
+
         if audio_path is not None:
             audio_duration = await _probe_audio_duration(audio_path)
             audio_filters: List[str] = []
             include_shortest = False
             duration_tolerance = 0.05
+
+            logger.info(
+                "Audio duration resolved: %s",
+                f"{audio_duration:.2f}s" if audio_duration is not None else "unknown",
+            )
 
             if video_duration is not None and audio_duration is not None:
                 if audio_duration + duration_tolerance < video_duration:
@@ -760,8 +802,11 @@ async def export_animation(
         )
         _, stderr = await process.communicate()
 
+        logger.info("ffmpeg command finished with code %s", process.returncode)
+
         if process.returncode != 0 or not output_path.exists():
             detail = stderr.decode(errors="ignore") if stderr else "ffmpeg failed to render the video."
+            logger.error("ffmpeg failed: %s", detail.strip())
             raise HTTPException(status_code=500, detail=detail.strip() or "Video export failed.")
 
         def iterfile() -> Any:
@@ -784,6 +829,7 @@ async def export_animation(
         raise
     except Exception as exc:
         _cleanup_directory(str(temp_dir_path))
+        logger.exception("Unexpected failure during export")
         raise HTTPException(status_code=500, detail=f"Failed to export video: {exc}") from exc
 
 @app.get("/", response_class=HTMLResponse)
