@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -29,6 +30,9 @@ except ModuleNotFoundError:
 # 0. 配置
 # -----------------------------------------------------------------------
 shanghai_tz = pytz.timezone("Asia/Shanghai")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("fogsight.app")
 
 credentials = json.load(open("credentials.json"))
 APP_ROOT = Path(__file__).resolve().parent
@@ -125,7 +129,7 @@ def _coerce_positive_float(value: Any) -> Optional[float]:
     return None
 
 
-async def _probe_audio_duration(path: Path) -> Optional[float]:
+async def _probe_stream_duration(path: Path, stream_selector: str) -> Optional[float]:
     if shutil.which("ffprobe") is None:
         return None
 
@@ -134,7 +138,7 @@ async def _probe_audio_duration(path: Path) -> Optional[float]:
         "-v",
         "error",
         "-select_streams",
-        "a:0",
+        stream_selector,
         "-show_entries",
         "stream=duration",
         "-of",
@@ -160,6 +164,14 @@ async def _probe_audio_duration(path: Path) -> Optional[float]:
         return duration if duration > 0 else None
     except (ValueError, IndexError):
         return None
+
+
+async def _probe_audio_duration(path: Path) -> Optional[float]:
+    return await _probe_stream_duration(path, "a:0")
+
+
+async def _probe_video_duration(path: Path) -> Optional[float]:
+    return await _probe_stream_duration(path, "v:0")
 
 
 async def _extract_animation_duration(page: Page) -> Optional[float]:
@@ -605,6 +617,12 @@ async def export_animation(
     if not html or not html.strip():
         raise HTTPException(status_code=400, detail="Animation HTML is required for export.")
 
+    logger.info(
+        "Received export request. html_length=%d, audio_filename=%s",
+        len(html),
+        getattr(audio, "filename", None) if audio else None,
+    )
+
     if shutil.which("ffmpeg") is None:
         raise HTTPException(status_code=500, detail="ffmpeg is not available on the server.")
 
@@ -617,18 +635,30 @@ async def export_animation(
         (temp_dir_path / "animation.html").write_text(html, encoding="utf-8")
 
         if audio is not None:
+            audio_filename = audio.filename
+            audio_content_type = audio.content_type
             audio_bytes = await audio.read()
             await audio.close()
             if audio_bytes:
-                suffix = Path(audio.filename or "").suffix
-                if not suffix and audio.content_type:
-                    guessed = mimetypes.guess_extension(audio.content_type)
+                suffix = Path(audio_filename or "").suffix
+                if not suffix and audio_content_type:
+                    guessed = mimetypes.guess_extension(audio_content_type)
                     if guessed:
                         suffix = guessed
                 if not suffix:
                     suffix = ".wav"
                 audio_path = temp_dir_path / f"voiceover{suffix}"
                 audio_path.write_bytes(audio_bytes)
+                logger.info(
+                    "Saved voiceover to %s (%d bytes). content_type=%s",
+                    audio_path,
+                    audio_path.stat().st_size,
+                    audio_content_type,
+                )
+            else:
+                logger.info("Audio file was empty. Skipping voiceover track.")
+        else:
+            logger.info("No voiceover track provided for export.")
 
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
@@ -647,6 +677,11 @@ async def export_animation(
 
                 render_duration = await _determine_render_duration(page, audio_path)
                 wait_ms = max(0, int(render_duration * 1000))
+                logger.info(
+                    "Determined render duration: %.2f seconds (wait_ms=%d)",
+                    render_duration,
+                    wait_ms,
+                )
                 if wait_ms:
                     await page.wait_for_timeout(wait_ms)
 
@@ -672,13 +707,47 @@ async def export_animation(
         if recorded_video_path is None or not recorded_video_path.exists():
             raise HTTPException(status_code=500, detail="Recorded animation video was not found.")
 
+        logger.info(
+            "Captured Playwright video at %s (%d bytes)",
+            recorded_video_path,
+            recorded_video_path.stat().st_size if recorded_video_path.exists() else -1,
+        )
+
         if output_path.exists():
             output_path.unlink()
 
         if audio_path is not None and not audio_path.exists():
             audio_path = None
 
+        video_duration = await _probe_video_duration(recorded_video_path)
+        audio_duration: Optional[float] = None
+
         if audio_path is not None:
+            audio_duration = await _probe_audio_duration(audio_path)
+            audio_filters: List[str] = []
+            include_shortest = False
+            duration_tolerance = 0.05
+
+            logger.info(
+                "Duration probe results. video_duration=%s, audio_duration=%s",
+                f"{video_duration:.3f}" if video_duration is not None else "unknown",
+                f"{audio_duration:.3f}" if audio_duration is not None else "unknown",
+            )
+
+            if video_duration is not None and audio_duration is not None:
+                if audio_duration + duration_tolerance < video_duration:
+                    audio_filters.append("apad")
+                elif audio_duration > video_duration + duration_tolerance:
+                    include_shortest = True
+            else:
+                # When durations cannot be determined, prefer padding to avoid
+                # prematurely ending the muxed output.
+                audio_filters.append("apad")
+
+            if audio_filters:
+                logger.info("Applying audio filters: %s", ",".join(audio_filters))
+            logger.info("Include -shortest flag: %s", include_shortest)
+
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-y",
@@ -696,11 +765,20 @@ async def export_animation(
                 "aac",
                 "-b:a",
                 "192k",
+            ]
+
+            if audio_filters:
+                ffmpeg_cmd.extend(["-af", ",".join(audio_filters)])
+
+            ffmpeg_cmd.extend([
                 "-movflags",
                 "+faststart",
-                "-shortest",
-                str(output_path),
-            ]
+            ])
+
+            if include_shortest:
+                ffmpeg_cmd.append("-shortest")
+
+            ffmpeg_cmd.append(str(output_path))
         else:
             ffmpeg_cmd = [
                 "ffmpeg",
@@ -718,6 +796,8 @@ async def export_animation(
                 str(output_path),
             ]
 
+        logger.info("Running ffmpeg command: %s", " ".join(str(arg) for arg in ffmpeg_cmd))
+
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -725,9 +805,22 @@ async def export_animation(
         )
         _, stderr = await process.communicate()
 
+        stderr_text = stderr.decode(errors="ignore") if stderr else ""
+
         if process.returncode != 0 or not output_path.exists():
-            detail = stderr.decode(errors="ignore") if stderr else "ffmpeg failed to render the video."
+            detail = stderr_text if stderr_text else "ffmpeg failed to render the video."
+            logger.error(
+                "ffmpeg failed with returncode=%s. stderr=%s",
+                process.returncode,
+                detail.strip(),
+            )
             raise HTTPException(status_code=500, detail=detail.strip() or "Video export failed.")
+
+        logger.info(
+            "ffmpeg completed successfully (returncode=%s). Output size=%d bytes",
+            process.returncode,
+            output_path.stat().st_size if output_path.exists() else -1,
+        )
 
         def iterfile() -> Any:
             with output_path.open("rb") as file:
