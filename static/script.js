@@ -27,6 +27,9 @@ document.addEventListener('DOMContentLoaded', () => {
         openInNewWindow: { zh: "在新窗口中打开", en: "Open in new window" },
         saveAsHTML: { zh: "保存为 HTML", en: "Save as HTML" },
         exportAsVideo: { zh: "导出为视频", en: "Export as Video" },
+        exportingVideo: { zh: "视频导出中...", en: "Exporting video..." },
+        exportReady: { zh: "视频已导出", en: "Video exported" },
+        exportFailed: { zh: "视频导出失败", en: "Video export failed" },
         generateVoiceover: { zh: "生成配音", en: "Generate Voiceover" },
         downloadVoiceover: { zh: "下载配音", en: "Download Voiceover" },
         featureComingSoon: { zh: "该功能正在开发中，将在不久的将来推出。\n 请关注我们的官方 GitHub 仓库以获取最新动态！", en: "This feature is under development and will be available soon.\n Follow our official GitHub repository for the latest updates!" },
@@ -108,6 +111,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function setVoiceoverButtonTranslation(button, key) {
+        if (!button) return;
+        const label = button.querySelector('span[data-translate-key]');
+        if (!label) return;
+        if (key) label.dataset.translateKey = key;
+        const translation = translations[key]?.[currentLang];
+        if (translation) label.textContent = translation;
+    }
+
+    function setExportButtonTranslation(button, key) {
         if (!button) return;
         const label = button.querySelector('span[data-translate-key]');
         if (!label) return;
@@ -336,6 +348,46 @@ document.addEventListener('DOMContentLoaded', () => {
         if (downloadButton) {
             downloadButton.disabled = false;
         }
+    }
+
+    async function getVoiceoverBlob(playerElement) {
+        if (!playerElement) return null;
+        const audioElement = playerElement.querySelector('.voiceover-container audio');
+        if (!audioElement) return null;
+        const source = audioElement.dataset.objectUrl || audioElement.src;
+        if (!source) return null;
+        try {
+            const response = await fetch(source);
+            if (!response.ok) return null;
+            return await response.blob();
+        } catch (error) {
+            console.warn('Failed to retrieve voiceover audio blob:', error);
+            return null;
+        }
+    }
+
+    async function parseErrorResponse(response, fallbackMessage) {
+        if (!response) return fallbackMessage;
+        const contentType = response.headers?.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+            try {
+                const data = await response.json();
+                if (typeof data?.detail === 'string' && data.detail.trim()) {
+                    return data.detail;
+                }
+            } catch (error) {
+                console.warn('Failed to parse JSON error response:', error);
+            }
+        }
+
+        try {
+            const text = await response.text();
+            if (text) return text;
+        } catch (error) {
+            console.warn('Failed to read error response text:', error);
+        }
+
+        return fallbackMessage;
     }
 
     function handleFormSubmit(e) {
@@ -578,11 +630,83 @@ document.addEventListener('DOMContentLoaded', () => {
                 link.remove();
             });
         }
-        playerElement.querySelector('.export-video')?.addEventListener('click', () => {
-            featureModal.querySelector('p').textContent = translations.featureComingSoon[currentLang];
-            modalGitHubButton.textContent = translations.visitGitHub[currentLang];
-            featureModal.classList.add('visible');
-        });
+        const exportButton = playerElement.querySelector('.export-video');
+        if (exportButton) {
+            const exportLabel = exportButton.querySelector('span[data-translate-key]');
+            const defaultExportKey = exportLabel?.dataset.translateKey || 'exportAsVideo';
+            exportButton.addEventListener('click', async () => {
+                if (exportButton.disabled) return;
+
+                const animationHtml = iframe?.srcdoc || htmlContent || '';
+                if (!animationHtml.trim()) {
+                    const fallback = translations.errorMessage?.[currentLang]
+                        || translations.exportFailed?.[currentLang]
+                        || 'Unable to export video.';
+                    showWarning(fallback);
+                    return;
+                }
+
+                exportButton.disabled = true;
+                setExportButtonTranslation(exportButton, 'exportingVideo');
+
+                let exportSucceeded = false;
+                let errorMessage = translations.exportFailed?.[currentLang]
+                    || translations.errorMessage?.[currentLang]
+                    || 'Video export failed.';
+
+                try {
+                    const formData = new FormData();
+                    formData.append('html', animationHtml);
+
+                    const voiceoverBlob = await getVoiceoverBlob(playerElement);
+                    if (voiceoverBlob) {
+                        const safeTopic = (topic || 'voiceover').trim().replace(/\s+/g, '_') || 'voiceover';
+                        formData.append('audio', voiceoverBlob, `${safeTopic}.wav`);
+                    }
+
+                    const response = await fetch(`${config.apiBaseUrl}/export`, {
+                        method: 'POST',
+                        body: formData,
+                    });
+
+                    if (!response.ok) {
+                        errorMessage = await parseErrorResponse(response, errorMessage);
+                        showWarning(errorMessage);
+                        return;
+                    }
+
+                    const videoBlob = await response.blob();
+                    const url = URL.createObjectURL(videoBlob);
+                    const safeTopic = (topic || 'animation').trim().replace(/\s+/g, '_') || 'animation';
+                    const downloadLink = Object.assign(document.createElement('a'), {
+                        href: url,
+                        download: `${safeTopic}.mp4`,
+                    });
+                    document.body.appendChild(downloadLink);
+                    downloadLink.click();
+                    downloadLink.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+                    setExportButtonTranslation(exportButton, 'exportReady');
+                    exportSucceeded = true;
+                } catch (error) {
+                    console.error('Video export failed:', error);
+                    if (!exportSucceeded) {
+                        showWarning(errorMessage);
+                    }
+                } finally {
+                    if (exportSucceeded) {
+                        setTimeout(() => {
+                            exportButton.disabled = false;
+                            setExportButtonTranslation(exportButton, defaultExportKey);
+                        }, 1500);
+                    } else {
+                        exportButton.disabled = false;
+                        setExportButtonTranslation(exportButton, defaultExportKey);
+                    }
+                }
+            });
+        }
         chatLog.appendChild(playerElement);
         scrollToBottom();
         autoGenerateVoiceoverForPlayer(playerElement, htmlContent, topic).catch((error) => {

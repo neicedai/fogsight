@@ -1,6 +1,9 @@
 import asyncio
 import json
+import mimetypes
 import os
+import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -15,6 +18,8 @@ from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from playwright.async_api import async_playwright
+from starlette.background import BackgroundTask
 try:
     import google.generativeai as genai
 except ModuleNotFoundError:
@@ -84,6 +89,10 @@ def _load_binary_file(path: Path, description: str) -> bytes:
             status_code=500,
             detail=f"Failed to read {description} at {path}.",
         ) from exc
+
+
+def _cleanup_directory(path: str) -> None:
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _prepare_emotion_payload(
@@ -429,6 +438,152 @@ async def generate_auto_voiceover(payload: AutoVoiceoverRequest):
         speaker_tuple,
         emo_tuple,
     )
+
+
+@app.post("/export")
+async def export_animation(
+    html: str = Form(...),
+    audio: Optional[UploadFile] = File(None),
+):
+    """Render the generated animation and stream it back as an MP4 file."""
+
+    if not html or not html.strip():
+        raise HTTPException(status_code=400, detail="Animation HTML is required for export.")
+
+    if shutil.which("ffmpeg") is None:
+        raise HTTPException(status_code=500, detail="ffmpeg is not available on the server.")
+
+    temp_dir_path = Path(tempfile.mkdtemp(prefix="export_"))
+    image_path = temp_dir_path / "frame.png"
+    audio_path: Optional[Path] = None
+    output_path = temp_dir_path / "animation.mp4"
+
+    try:
+        (temp_dir_path / "animation.html").write_text(html, encoding="utf-8")
+
+        if audio is not None:
+            audio_bytes = await audio.read()
+            await audio.close()
+            if audio_bytes:
+                suffix = Path(audio.filename or "").suffix
+                if not suffix and audio.content_type:
+                    guessed = mimetypes.guess_extension(audio.content_type)
+                    if guessed:
+                        suffix = guessed
+                if not suffix:
+                    suffix = ".wav"
+                audio_path = temp_dir_path / f"voiceover{suffix}"
+                audio_path.write_bytes(audio_bytes)
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = None
+            try:
+                page = await browser.new_page(viewport={"width": 1920, "height": 1080})
+                await page.set_content(html, wait_until="networkidle")
+                await page.wait_for_timeout(1000)
+                await page.screenshot(path=str(image_path), full_page=True)
+            finally:
+                if page is not None:
+                    await page.close()
+                await browser.close()
+
+        if not image_path.exists():
+            raise HTTPException(status_code=500, detail="Failed to capture animation frame.")
+
+        if output_path.exists():
+            output_path.unlink()
+
+        if audio_path is not None and not audio_path.exists():
+            audio_path = None
+
+        if audio_path is not None:
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-loop",
+                "1",
+                "-i",
+                str(image_path),
+                "-i",
+                str(audio_path),
+                "-c:v",
+                "libx264",
+                "-tune",
+                "stillimage",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-shortest",
+                str(output_path),
+            ]
+        else:
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-loop",
+                "1",
+                "-i",
+                str(image_path),
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-c:v",
+                "libx264",
+                "-tune",
+                "stillimage",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-shortest",
+                "-t",
+                "5",
+                str(output_path),
+            ]
+
+        process = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+
+        if process.returncode != 0 or not output_path.exists():
+            detail = stderr.decode(errors="ignore") if stderr else "ffmpeg failed to render the video."
+            raise HTTPException(status_code=500, detail=detail.strip() or "Video export failed.")
+
+        def iterfile() -> Any:
+            with output_path.open("rb") as file:
+                while True:
+                    chunk = file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"animation-{timestamp}.mp4"
+        headers = {"Content-Disposition": f"attachment; filename={filename}"}
+        background = BackgroundTask(_cleanup_directory, str(temp_dir_path))
+
+        return StreamingResponse(iterfile(), media_type="video/mp4", headers=headers, background=background)
+
+    except HTTPException:
+        _cleanup_directory(str(temp_dir_path))
+        raise
+    except Exception as exc:
+        _cleanup_directory(str(temp_dir_path))
+        raise HTTPException(status_code=500, detail=f"Failed to export video: {exc}") from exc
 
 @app.get("/", response_class=HTMLResponse)
 async def read_index(request: Request):
