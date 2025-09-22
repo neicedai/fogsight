@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -34,11 +35,28 @@ shanghai_tz = pytz.timezone("Asia/Shanghai")
 logging.basicConfig(level=os.getenv("FOGSIGHT_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("fogsight")
 
-credentials = json.load(open("credentials.json"))
 APP_ROOT = Path(__file__).resolve().parent
-API_KEY = credentials["API_KEY"]
-BASE_URL = credentials.get("BASE_URL", "")
-MODEL = credentials.get("MODEL", "gemini-2.5-pro")
+
+
+def _resolve_credentials_path() -> Path:
+    env_path = os.getenv("FOGSIGHT_CREDENTIALS_PATH")
+    candidates = []
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates.extend([APP_ROOT / "credentials.json", APP_ROOT / "demo-credentials.json"])
+
+    for path in candidates:
+        if path and path.exists():
+            return path
+
+    raise RuntimeError("请在环境变量里配置 API_KEY")
+
+
+CREDENTIALS_PATH = _resolve_credentials_path()
+credentials = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
+API_KEY = os.getenv("FOGSIGHT_API_KEY", credentials.get("API_KEY", ""))
+BASE_URL = os.getenv("FOGSIGHT_BASE_URL", credentials.get("BASE_URL", ""))
+MODEL = os.getenv("FOGSIGHT_MODEL", credentials.get("MODEL", "gemini-2.5-pro"))
 
 if API_KEY.startswith("sk-"):
     # 为 OpenRouter 添加应用标识
@@ -105,27 +123,64 @@ def _cleanup_directory(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+_DURATION_PATTERN = re.compile(
+    r"(?P<value>\d+(?:\.\d+)?)(?:\s*(?P<unit>ms|milliseconds?|毫秒|s|sec|secs|second|seconds|秒))?",
+    re.IGNORECASE,
+)
+
+_MS_KEYWORDS = ("毫秒", "millisecond", "milliseconds", "durationms", "duration_ms", "duration-ms")
+_MS_DIGIT_PATTERN = re.compile(r"\d\s*ms\b", re.IGNORECASE)
+
+
+def _normalize_duration_value(
+    numeric: float,
+    *,
+    unit: Optional[str] = None,
+    original_text: Optional[str] = None,
+) -> Optional[float]:
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+
+    normalized_unit = (unit or "").lower()
+    if normalized_unit in {"ms", "millisecond", "milliseconds", "毫秒"}:
+        return numeric / 1000.0
+    if normalized_unit in {"s", "sec", "secs", "second", "seconds", "秒"}:
+        return numeric
+
+    lowered_original = (original_text or "").lower()
+    if any(keyword in lowered_original for keyword in _MS_KEYWORDS) or _MS_DIGIT_PATTERN.search(lowered_original):
+        return numeric / 1000.0
+
+    if numeric >= 1000:
+        return numeric / 1000.0
+
+    return numeric
+
+
 def _coerce_positive_float(value: Any) -> Optional[float]:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        value = float(value)
-        return value if value > 0 else None
+        numeric = float(value)
+        return _normalize_duration_value(numeric)
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
             return None
         try:
             numeric = float(stripped)
-            return numeric if numeric > 0 else None
+            normalized = _normalize_duration_value(numeric, original_text=stripped)
+            if normalized is not None:
+                return normalized
         except ValueError:
-            match = re.search(r"(\d+(?:\.\d+)?)", stripped)
+            match = _DURATION_PATTERN.search(stripped)
             if match:
                 try:
-                    numeric = float(match.group(1))
-                    return numeric if numeric > 0 else None
+                    numeric = float(match.group("value"))
                 except ValueError:
                     return None
+                unit = match.group("unit")
+                return _normalize_duration_value(numeric, unit=unit, original_text=stripped)
     return None
 
 
