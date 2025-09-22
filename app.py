@@ -2,6 +2,7 @@ import asyncio
 import json
 import mimetypes
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime
@@ -18,7 +19,7 @@ from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from playwright.async_api import async_playwright
+from playwright.async_api import Page, async_playwright
 from starlette.background import BackgroundTask
 try:
     import google.generativeai as genai
@@ -72,6 +73,11 @@ DEFAULT_EMO_AUDIO_PATH = (
     or os.getenv("DEFAULT_EMO_AUDIO_PATH")
 )
 
+DEFAULT_EXPORT_DURATION = 8.0
+MIN_EXPORT_DURATION = 3.0
+MAX_EXPORT_DURATION = 120.0
+EXPORT_BUFFER_SECONDS = 0.5
+
 def _resolve_path(path_str: Optional[str]) -> Optional[Path]:
     if not path_str:
         return None
@@ -93,6 +99,155 @@ def _load_binary_file(path: Path, description: str) -> bytes:
 
 def _cleanup_directory(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
+
+
+def _coerce_positive_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        value = float(value)
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            numeric = float(stripped)
+            return numeric if numeric > 0 else None
+        except ValueError:
+            match = re.search(r"(\d+(?:\.\d+)?)", stripped)
+            if match:
+                try:
+                    numeric = float(match.group(1))
+                    return numeric if numeric > 0 else None
+                except ValueError:
+                    return None
+    return None
+
+
+async def _probe_audio_duration(path: Path) -> Optional[float]:
+    if shutil.which("ffprobe") is None:
+        return None
+
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return None
+
+    stdout, _ = await process.communicate()
+    if process.returncode != 0 or not stdout:
+        return None
+
+    try:
+        duration = float(stdout.decode().strip().splitlines()[0])
+        return duration if duration > 0 else None
+    except (ValueError, IndexError):
+        return None
+
+
+async def _extract_animation_duration(page: Page) -> Optional[float]:
+    candidate_scripts = [
+        "window.fogsightAnimationDuration",
+        "window.animationDuration",
+        "window.__FOGSIGHT_ANIMATION_DURATION__",
+        "window.__ANIMATION_DURATION__",
+        "document.body?.dataset?.animationDuration",
+    ]
+
+    for script in candidate_scripts:
+        try:
+            value = await page.evaluate(f"() => {{ try {{ return {script}; }} catch (e) {{ return null; }} }}")
+        except Exception:
+            continue
+        duration = _coerce_positive_float(value)
+        if duration:
+            return duration
+
+    try:
+        dataset_value = await page.evaluate(
+            "() => {"
+            "  const el = document.querySelector('[data-animation-duration]');"
+            "  return el ? el.dataset.animationDuration || el.getAttribute('data-animation-duration') : null;"
+            "}"
+        )
+    except Exception:
+        dataset_value = None
+
+    duration = _coerce_positive_float(dataset_value)
+    if duration:
+        return duration
+
+    try:
+        meta_value = await page.evaluate(
+            "() => {"
+            "  const meta = document.querySelector('meta[name=\"animation-duration\"], meta[name=\"video-duration\"], meta[name=\"fogsight:animation-duration\"]');"
+            "  return meta ? meta.content : null;"
+            "}"
+        )
+    except Exception:
+        meta_value = None
+
+    duration = _coerce_positive_float(meta_value)
+    if duration:
+        return duration
+
+    try:
+        gsap_duration = await page.evaluate(
+            "() => {"
+            "  const timeline = typeof gsap !== 'undefined' ? (gsap.globalTimeline || gsap.timeline?.()) : null;"
+            "  if (!timeline) return null;"
+            "  if (typeof timeline.totalDuration === 'function') return timeline.totalDuration();"
+            "  if (typeof timeline.duration === 'function') return timeline.duration();"
+            "  if (typeof timeline.totalTime === 'function') return timeline.totalTime();"
+            "  return null;"
+            "}"
+        )
+    except Exception:
+        gsap_duration = None
+
+    duration = _coerce_positive_float(gsap_duration)
+    if duration:
+        return duration
+
+    return None
+
+
+async def _determine_render_duration(page: Page, audio_path: Optional[Path]) -> float:
+    durations: List[float] = []
+
+    page_duration = await _extract_animation_duration(page)
+    if page_duration:
+        durations.append(page_duration)
+
+    if audio_path is not None and audio_path.exists():
+        audio_duration = await _probe_audio_duration(audio_path)
+        if audio_duration:
+            durations.append(audio_duration)
+
+    if not durations:
+        return DEFAULT_EXPORT_DURATION
+
+    longest = max(durations)
+    buffered = longest + EXPORT_BUFFER_SECONDS
+    constrained = max(MIN_EXPORT_DURATION, min(MAX_EXPORT_DURATION, buffered))
+    return constrained
 
 
 def _prepare_emotion_payload(
@@ -454,8 +609,8 @@ async def export_animation(
         raise HTTPException(status_code=500, detail="ffmpeg is not available on the server.")
 
     temp_dir_path = Path(tempfile.mkdtemp(prefix="export_"))
-    image_path = temp_dir_path / "frame.png"
     audio_path: Optional[Path] = None
+    recorded_video_path: Optional[Path] = None
     output_path = temp_dir_path / "animation.mp4"
 
     try:
@@ -477,19 +632,45 @@ async def export_animation(
 
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
+            context = None
             page = None
+            video = None
             try:
-                page = await browser.new_page(viewport={"width": 1920, "height": 1080})
+                context = await browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    record_video_dir=str(temp_dir_path),
+                    record_video_size={"width": 1920, "height": 1080},
+                )
+                page = await context.new_page()
                 await page.set_content(html, wait_until="networkidle")
-                await page.wait_for_timeout(1000)
-                await page.screenshot(path=str(image_path), full_page=True)
+                await page.wait_for_timeout(500)
+
+                render_duration = await _determine_render_duration(page, audio_path)
+                wait_ms = max(0, int(render_duration * 1000))
+                if wait_ms:
+                    await page.wait_for_timeout(wait_ms)
+
+                video = page.video
             finally:
-                if page is not None:
-                    await page.close()
+                if context is not None:
+                    await context.close()
+                elif page is not None:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
                 await browser.close()
 
-        if not image_path.exists():
-            raise HTTPException(status_code=500, detail="Failed to capture animation frame.")
+        if video is None:
+            raise HTTPException(status_code=500, detail="Failed to capture animation video.")
+
+        try:
+            recorded_video_path = Path(await video.path())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to save recorded video: {exc}") from exc
+
+        if recorded_video_path is None or not recorded_video_path.exists():
+            raise HTTPException(status_code=500, detail="Recorded animation video was not found.")
 
         if output_path.exists():
             output_path.unlink()
@@ -501,22 +682,20 @@ async def export_animation(
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-y",
-                "-loop",
-                "1",
                 "-i",
-                str(image_path),
+                str(recorded_video_path),
                 "-i",
                 str(audio_path),
                 "-c:v",
                 "libx264",
-                "-tune",
-                "stillimage",
+                "-preset",
+                "fast",
+                "-pix_fmt",
+                "yuv420p",
                 "-c:a",
                 "aac",
                 "-b:a",
                 "192k",
-                "-pix_fmt",
-                "yuv420p",
                 "-movflags",
                 "+faststart",
                 "-shortest",
@@ -526,29 +705,16 @@ async def export_animation(
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-y",
-                "-loop",
-                "1",
                 "-i",
-                str(image_path),
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=channel_layout=stereo:sample_rate=44100",
+                str(recorded_video_path),
                 "-c:v",
                 "libx264",
-                "-tune",
-                "stillimage",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
+                "-preset",
+                "fast",
                 "-pix_fmt",
                 "yuv420p",
                 "-movflags",
                 "+faststart",
-                "-shortest",
-                "-t",
-                "5",
                 str(output_path),
             ]
 
