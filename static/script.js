@@ -168,6 +168,36 @@ document.addEventListener('DOMContentLoaded', () => {
             segments.push(chineseText);
         };
 
+        const decodeQuotedString = (text) => {
+            if (!text) return '';
+            const escaped = text
+                .replace(/\\/g, '\\\\')
+                .replace(/"/g, '\\"')
+                .replace(/\r/g, '\\r')
+                .replace(/\n/g, '\\n')
+                .replace(/\t/g, '\\t');
+            try {
+                return JSON.parse(`"${escaped}"`);
+            } catch (error) {
+                return text
+                    .replace(/\\n/g, ' ')
+                    .replace(/\\r/g, ' ')
+                    .replace(/\\t/g, ' ')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\'/g, "'")
+                    .replace(/\\`/g, '`');
+            }
+        };
+
+        const sanitizeScriptText = (text) => {
+            if (!text) return '';
+            const trimmed = text.replace(/\s+/g, ' ').trim();
+            if (!trimmed) return '';
+            if (/[:：]\s*$/.test(trimmed)) return '';
+            if (/[:：]/.test(trimmed) && !/[:：]\s*[\u3400-\u9fff0-9]/.test(trimmed)) return '';
+            return trimmed;
+        };
+
         const candidateElements = new Set();
         selectors.forEach((selector) => {
             doc.querySelectorAll(selector).forEach((el) => candidateElements.add(el));
@@ -183,6 +213,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (parentTag && ['script', 'style'].includes(parentTag)) continue;
                 collectText(node.textContent || '');
             }
+        }
+
+        if (segments.length === 0) {
+            const quotedStringRegex = /(["'`])((?:\\.|(?!\1)[^\\])*)\1/g;
+            const scriptSources = [htmlContent, ...Array.from(doc.querySelectorAll('script')).map((el) => el.textContent || '')];
+            scriptSources.forEach((sourceText) => {
+                if (!sourceText || segments.length >= 200) return; // avoid unnecessary work
+                let match;
+                while ((match = quotedStringRegex.exec(sourceText)) !== null) {
+                    const rawValue = match[2];
+                    if (!rawValue || !CHINESE_CHAR_REGEX.test(rawValue)) continue;
+                    const decoded = sanitizeScriptText(decodeQuotedString(rawValue));
+                    if (!decoded) continue;
+                    collectText(decoded);
+                    if (segments.join('\n').length >= 4000) break;
+                }
+            });
         }
 
         const combined = segments.join('\n');
