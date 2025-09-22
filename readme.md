@@ -104,8 +104,23 @@
    cp demo-credentials.json credentials.json
    # 复制 demo-credentials.json 文件并重命名为 credentials.json
    # 编辑 credentials.json 文件，填入您的 API_KEY 和 BASE_URL。
-   # 若要启用“生成配音”按钮，请额外添加 TTS_BASE_URL 指向运行中的 tts.py 服务，例如：
-   # "TTS_BASE_URL": "http://127.0.0.1:9000"
+   # 若要启用“生成配音”按钮，请额外添加 TTS_ENDPOINT 指向运行中的 TTS 服务，例如：
+   # "TTS_ENDPOINT": "http://127.0.0.1:9000/tts"
+   # 若依旧使用旧版本配置，也可以填写 TTS_BASE_URL（无需包含 /tts）
+   # 配置默认的说话人参考音频与情感参数示例：
+   # "DEFAULT_SPEAKER_AUDIO_PATH": "../examples/voice_12.wav",
+   # "TTS_DEFAULT_PARAMETERS": {
+   #     "use_random": false,
+   #     "interval_silence": 200,
+   #     "max_text_tokens_per_segment": 120,
+   #     "temperature": 0.8
+   # },
+   # "TTS_EMOTION_PRESETS": {
+   #     "happy": {
+   #         "emo_alpha": 0.8,
+   #         "use_emo_text": false
+   #     }
+   # }
    # **请注意**，我们使用的是与 OpenAI 兼容的 SDK，但您仍应使用Gemini 2.5 pro
    ```
 
@@ -151,7 +166,8 @@
    #   "BASE_URL": "",
    #   "MODEL": "gemini-2.5-pro"
    # }
-   # 如果需要在容器内启用配音按钮，可同时设置 TTS_BASE_URL 指向运行 tts.py 的地址
+   # 如果需要在容器内启用配音按钮，可设置 TTS_ENDPOINT 指向运行的 TTS 服务（例如 http://127.0.0.1:9000/tts）
+   # 旧版本配置仍可继续使用 TTS_BASE_URL（无需携带 /tts）
    ```
 
 4. **使用 Docker Compose 启动:**
