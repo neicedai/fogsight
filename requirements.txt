@@ -7,3 +7,5 @@ pytz
 google-genai
 requests
 httpx
+playwright
+python-multipart
