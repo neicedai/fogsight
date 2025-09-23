@@ -766,7 +766,10 @@ async def export_animation(
                     record_video_size={"width": 1920, "height": 1080},
                 )
                 page = await context.new_page()
-                page.on("console", lambda msg: console_messages.append(f"{msg.type}: {msg.text()}"))
+                page.on(
+                    "console",
+                    lambda msg: console_messages.append(f"{msg.type}: {msg.text}"),
+                )
                 page.on("pageerror", lambda exc: console_messages.append(f"pageerror: {exc}"))
 
                 logger.debug("Setting page content for export")
