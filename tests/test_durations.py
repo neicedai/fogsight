@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("FOGSIGHT_API_KEY", "test-key")
 os.environ.setdefault("FOGSIGHT_CREDENTIALS_PATH", str(ROOT / "demo-credentials.json"))
 
-from app import _coerce_positive_float
+from app import _coerce_positive_float, _normalize_voiceover_text
 
 
 @pytest.mark.parametrize(
@@ -49,3 +49,13 @@ def test_coerce_positive_float(raw, expected):
 def test_values_without_units_remain_seconds():
     assert _coerce_positive_float(90) == pytest.approx(90.0)
     assert _coerce_positive_float("42") == pytest.approx(42.0)
+
+
+def test_normalize_voiceover_text_collapses_lines():
+    text = "第一句。\n第二句\n\n第三句\r\nFinally, an English line"
+    normalized = _normalize_voiceover_text(text)
+    assert "第一句。" in normalized
+    assert "第二句。" in normalized
+    assert "第三句。" in normalized
+    assert "Finally, an English line" in normalized
+    assert "\n" not in normalized
