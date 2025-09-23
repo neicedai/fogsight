@@ -131,6 +131,9 @@ _DURATION_PATTERN = re.compile(
 _MS_KEYWORDS = ("毫秒", "millisecond", "milliseconds", "durationms", "duration_ms", "duration-ms")
 _MS_DIGIT_PATTERN = re.compile(r"\d\s*ms\b", re.IGNORECASE)
 
+_CHINESE_CHAR_PATTERN = re.compile(r"[\u3400-\u9fff]")
+_AUDIO_DURATION_TOLERANCE = 0.05
+
 
 def _normalize_duration_value(
     numeric: float,
@@ -182,6 +185,73 @@ def _coerce_positive_float(value: Any) -> Optional[float]:
                 unit = match.group("unit")
                 return _normalize_duration_value(numeric, unit=unit, original_text=stripped)
     return None
+
+
+def _normalize_voiceover_text(text: str) -> str:
+    """Sanitize narration text before sending it to the TTS backend.
+
+    The TTS backend occasionally stops reading after the first line when the
+    payload contains hard line breaks.  We collapse multiple lines into a
+    single string while keeping natural sentence boundaries so the generated
+    audio covers the full narration.
+    """
+
+    if not text:
+        return ""
+
+    # Normalise newlines first so we can split reliably.
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    segments = []
+    for raw_segment in normalized.split("\n"):
+        stripped = raw_segment.strip()
+        if not stripped:
+            continue
+        collapsed = re.sub(r"\s+", " ", stripped)
+        if not collapsed:
+            continue
+
+        if collapsed[-1] in "。！？?.!":
+            segments.append(collapsed)
+        elif _CHINESE_CHAR_PATTERN.search(collapsed):
+            segments.append(collapsed + "。")
+        else:
+            segments.append(collapsed)
+
+    return " ".join(segments)
+
+
+def _plan_audio_muxing(
+    video_duration: Optional[float],
+    audio_duration: Optional[float],
+    *,
+    tolerance: float = _AUDIO_DURATION_TOLERANCE,
+) -> tuple[List[str], bool]:
+    """Determine how to combine video and audio streams via ffmpeg.
+
+    Returns a tuple of (audio_filters, include_shortest_flag).
+    """
+
+    audio_filters: List[str] = []
+    include_shortest = False
+
+    normalized_video = video_duration if video_duration and video_duration > 0 else None
+    normalized_audio = audio_duration if audio_duration and audio_duration > 0 else None
+
+    if normalized_video is not None and normalized_audio is not None:
+        if normalized_audio + tolerance < normalized_video:
+            audio_filters.append("apad")
+        elif normalized_audio > normalized_video + tolerance:
+            include_shortest = True
+    else:
+        audio_filters.append("apad")
+
+    if "apad" in audio_filters:
+        include_shortest = True
+
+    if normalized_video is None:
+        include_shortest = True
+
+    return audio_filters, include_shortest
 
 
 async def _probe_stream_duration(path: Path, stream_selector: str) -> Optional[float]:
@@ -547,9 +617,13 @@ async def _forward_tts_request(
     if not text or not text.strip():
         raise HTTPException(status_code=400, detail="Text for voiceover cannot be empty.")
 
+    sanitized_text = _normalize_voiceover_text(text)
+    if not sanitized_text:
+        raise HTTPException(status_code=400, detail="Voiceover text could not be processed.")
+
     tts_endpoint = _get_tts_endpoint()
 
-    data: Dict[str, Any] = {"text": text}
+    data: Dict[str, Any] = {"text": sanitized_text}
     if TTS_DEFAULT_PARAMETERS:
         data.update(TTS_DEFAULT_PARAMETERS)
 
@@ -783,24 +857,15 @@ async def export_animation(
 
         if audio_path is not None:
             audio_duration = await _probe_audio_duration(audio_path)
-            audio_filters: List[str] = []
-            include_shortest = False
-            duration_tolerance = 0.05
-
             logger.info(
                 "Audio duration resolved: %s",
                 f"{audio_duration:.2f}s" if audio_duration is not None else "unknown",
             )
 
-            if video_duration is not None and audio_duration is not None:
-                if audio_duration + duration_tolerance < video_duration:
-                    audio_filters.append("apad")
-                elif audio_duration > video_duration + duration_tolerance:
-                    include_shortest = True
-            else:
-                # When durations cannot be determined, prefer padding to avoid
-                # prematurely ending the muxed output.
-                audio_filters.append("apad")
+            audio_filters, include_shortest = _plan_audio_muxing(
+                video_duration,
+                audio_duration,
+            )
 
             ffmpeg_cmd = [
                 "ffmpeg",
