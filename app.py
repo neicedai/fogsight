@@ -766,7 +766,10 @@ async def export_animation(
                     record_video_size={"width": 1920, "height": 1080},
                 )
                 page = await context.new_page()
-                page.on("console", lambda msg: console_messages.append(f"{msg.type}: {msg.text()}"))
+                page.on(
+                    "console",
+                    lambda msg: console_messages.append(f"{msg.type}: {msg.text}"),
+                )
                 page.on("pageerror", lambda exc: console_messages.append(f"pageerror: {exc}"))
 
                 logger.debug("Setting page content for export")
@@ -834,12 +837,14 @@ async def export_animation(
             if video_duration is not None and audio_duration is not None:
                 if audio_duration + duration_tolerance < video_duration:
                     audio_filters.append("apad")
+                    include_shortest = True
                 elif audio_duration > video_duration + duration_tolerance:
                     include_shortest = True
             else:
                 # When durations cannot be determined, prefer padding to avoid
                 # prematurely ending the muxed output.
                 audio_filters.append("apad")
+                include_shortest = True
 
             ffmpeg_cmd = [
                 "ffmpeg",
