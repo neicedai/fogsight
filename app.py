@@ -834,12 +834,14 @@ async def export_animation(
             if video_duration is not None and audio_duration is not None:
                 if audio_duration + duration_tolerance < video_duration:
                     audio_filters.append("apad")
+                    include_shortest = True
                 elif audio_duration > video_duration + duration_tolerance:
                     include_shortest = True
             else:
                 # When durations cannot be determined, prefer padding to avoid
                 # prematurely ending the muxed output.
                 audio_filters.append("apad")
+                include_shortest = True
 
             ffmpeg_cmd = [
                 "ffmpeg",
