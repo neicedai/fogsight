@@ -5,7 +5,7 @@ import threading
 import time
 import os
 
-HOST = "127.0.0.1"  
+HOST = "192.168.101.212"  
 PORT = 8000
 
 def start_backend():
