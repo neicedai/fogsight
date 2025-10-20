@@ -47,11 +47,23 @@
 
     <div id="chat-view" class="chat-view">
         <header class="chat-header">
-            <button id="new-chat-button" class="new-chat-button" data-translate-key="newChatTitle" title="新对话">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-                <span data-translate-key="newChat">新对话</span>
-            </button>
-            <img src="/static/logo.png" alt="Studio Logo" class="logo" id="logo-chat">
+            <div class="chat-header-left">
+                <button id="new-chat-button" class="new-chat-button" data-translate-key="newChatTitle" title="新对话">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                    <span data-translate-key="newChat">新对话</span>
+                </button>
+            </div>
+            <div class="chat-header-right">
+                <div class="voiceover-toggle" role="group" aria-labelledby="voiceover-toggle-label">
+                    <span id="voiceover-toggle-label" class="voiceover-toggle-label" data-translate-key="voiceoverToggleLabel">自动配音</span>
+                    <label class="voiceover-toggle-control">
+                        <input type="checkbox" id="voiceover-toggle" role="switch" aria-checked="true">
+                        <span class="voiceover-toggle-slider"></span>
+                    </label>
+                    <span id="voiceover-toggle-state" class="voiceover-toggle-state" data-translate-key="voiceoverToggleOn">开启</span>
+                </div>
+                <img src="/static/logo.png" alt="Studio Logo" class="logo" id="logo-chat">
+            </div>
         </header>
         <main id="chat-log" class="chat-log"></main>
         <footer class="chat-footer">
